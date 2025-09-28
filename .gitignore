@@ -1,0 +1,97 @@
+# -----------------------
+# Node / JavaScript
+# -----------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+# Do NOT ignore package-lock.json if you want deterministic installs
+# (keep package-lock.json tracked)
+
+# -----------------------
+# Python
+# -----------------------
+# virtual environments (backend/.venv)
+.venv/
+backend/.venv/
+# bytecode, caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+# env files
+.env
+.env.local
+.venv_backend/
+
+# -----------------------
+# OS / Editor / IDE
+# -----------------------
+# Windows / macOS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln.docstates
+
+# -----------------------
+# Logs / runtime / temp
+# -----------------------
+*.log
+watch_logs/
+alexa_activity_log.txt
+
+# temporary or crash dumps
+*.pid
+*.seed
+
+# -----------------------
+# Generated reports / large outputs
+# -----------------------
+# If output.html or packet_report.json are generated artifacts, keep them out of git
+output.html
+packet_report.json
+Forensic_Log_Report.docx
+
+# -----------------------
+# Large media / debug assets
+# -----------------------
+# If these are generated or large debug images, ignore them; remove the line if you want them tracked
+debug_page.png
+error_debug.png
+event_frequency.png
+steps_per_day.png
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.zip
+*.tar.gz
+
+# -----------------------
+# Project-specific / optional
+# -----------------------
+# If matched_audio_transcripts.json is generated, ignore it
+matched_audio_transcripts.json
+# If audio_urls.json is generated, ignore it (uncomment if needed)
+# audio_urls.json
+
+# -----------------------
+# Git LFS / attributes
+# -----------------------
+.gitattributes
+
+# -----------------------
+# Safety / secrets
+# -----------------------
+# API keys, cookies, credentials
+cookies.json
+*.key
+*.pem
+secrets.*
