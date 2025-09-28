@@ -59,6 +59,13 @@ app.get('/api/packet-report', (req, res) => {
     // Path to the prettified JSON file.
     const jsonPath = path.join(__dirname, '..', 'matched_audio_transcripts.json');
     const hashScript = path.join(__dirname, 'hash.py');
+
+    // Ensure the JSON file exists
+    const fs = require('fs');
+    if (!fs.existsSync(jsonPath)) {
+        fs.writeFileSync(jsonPath, '{}'); // create blank JSON
+    }
+
     // Hash the JSON file before sending.
     exec(`python ${hashScript} ${jsonPath}`, (hashErr, hashStdout, hashStderr) => {
       if (hashErr) {
