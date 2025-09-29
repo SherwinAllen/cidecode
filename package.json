@@ -9,6 +9,7 @@
     "@testing-library/user-event": "^13.5.0",
     "cidecode": "file:",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
     "express": "^4.21.2",
     "framer-motion": "^12.4.10",
     "node-schedule": "^2.1.1",
