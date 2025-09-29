@@ -2,7 +2,10 @@
 const { Builder, By, until } = require('selenium-webdriver');
 const fs = require('fs');
 const path = require('path');
-
+require('dotenv').config({ 
+    path: path.resolve(__dirname, '.env'),
+    quiet: true
+  });
 
 // Get credentials from environment variables
 const AMAZON_EMAIL = process.env.AMAZON_EMAIL;
