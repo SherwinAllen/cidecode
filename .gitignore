@@ -95,3 +95,14 @@ cookies.json
 *.key
 *.pem
 secrets.*
+
+# Selenium automation artifacts
+backend/auth-debug-*
+backend/email-not-found-*
+backend/otp-failed-*
+backend/captcha-failed-*
+backend/approval-failed-*
+backend/auth-error-*
+backend/cookies.json
+backend/chrome-user-data/
+backend/audio_urls.json
