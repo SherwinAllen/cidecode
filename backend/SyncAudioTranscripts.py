@@ -44,7 +44,7 @@ def extract_transcripts_with_timestamps(file_path):
     return transcripts
 
 # Load audio URLs from a JSON file.
-with open("C:\\Users\\allen\\VsCode\\CIDECODE\\cidecode\\backend\\audio_urls.json", 'r') as f:
+with open("backend/audio_urls.json", 'r') as f:
     audio_urls = json.load(f)
 
 # Extract transcripts and timestamps from the transcript file.

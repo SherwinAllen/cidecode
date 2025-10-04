@@ -1,10 +1,16 @@
 import os
 import json
+import re
 import time
 from playwright.sync_api import sync_playwright
 
-# We'll use a set to track URLs we've already processed to avoid duplicates
+# Global sets and lists to track processed data
 PROCESSED_URLS = set()
+ALL_TRANSCRIPTS = []
+
+# Output files
+AUDIO_URLS_FILE = os.path.join("backend", "audio_urls.json")
+TRANSCRIPTS_FILE = "alexa_activity_log.txt"
 
 def intercept_request(route, request):
     """Intercepts network requests and stores potential audio URLs."""
@@ -48,12 +54,11 @@ def save_audio_url(url):
     PROCESSED_URLS.add(url)
     
     # Read existing URLs
-    audio_urls_path = os.path.join("backend", "audio_urls.json")
     existing_urls = []
     
     try:
-        if os.path.exists(audio_urls_path):
-            with open(audio_urls_path, "r") as f:
+        if os.path.exists(AUDIO_URLS_FILE):
+            with open(AUDIO_URLS_FILE, "r") as f:
                 existing_urls = json.load(f)
     except (json.JSONDecodeError, FileNotFoundError):
         existing_urls = []
@@ -63,7 +68,7 @@ def save_audio_url(url):
         existing_urls.append(url)
         
         # Save updated list
-        with open(audio_urls_path, "w") as f:
+        with open(AUDIO_URLS_FILE, "w") as f:
             json.dump(existing_urls, f, indent=2)
         
         print(f"   💾 IMMEDIATELY SAVED: {url}")
@@ -125,13 +130,43 @@ def find_all_activities(page):
     
     return None
 
-def process_single_activity(activity, activity_num, total_activities):
-    """Process a single activity"""
+def extract_single_transcript(activity, activity_num):
+    """Extract transcript from a single activity"""
+    try:
+        # Get the text content
+        text = activity.inner_text()
+        
+        if text.strip():  # Only process non-empty text
+            # Clean up the text
+            formatted_text = re.sub(r'(?<=[A-Za-z])(?=\d)', " ", text)
+            formatted_text = re.sub(r'(?<=[ap]m)(?=[A-Za-z])', " ", formatted_text, flags=re.IGNORECASE)
+            formatted_text = re.sub(r'\n+', '\n', formatted_text)  # Remove extra newlines
+            formatted_text = formatted_text.strip()
+            
+            # Create the formatted output for transcript file
+            transcript_data = f"--- Activity {activity_num} ---\n{formatted_text}\n"
+            print(f"      ✅ Extracted transcript from activity {activity_num}")
+            return transcript_data
+        else:
+            print(f"      ⚠️ No text found in activity {activity_num}")
+            return f"--- Activity {activity_num} [No text content] ---\n"
+            
+    except Exception as e:
+        print(f"      ❌ Error extracting transcript from activity {activity_num}: {e}")
+        return f"--- Activity {activity_num} [Error: {e}] ---\n"
+
+def process_single_activity_combined(activity, activity_num, total_activities):
+    """Process a single activity - extract transcript first, then trigger audio"""
     print(f"   📋 Processing activity {activity_num}/{total_activities}")
     
-    # Record current saved count before processing this activity
+    # Record current state before processing (for audio tracking)
     saved_before = len(PROCESSED_URLS)
-
+    
+    # Extract transcript first (before any interaction that might change DOM)
+    print("      📝 Extracting transcript...")
+    transcript_data = extract_single_transcript(activity, activity_num)
+    ALL_TRANSCRIPTS.append(transcript_data)
+    
     # Try to find and click expand button
     expand_buttons = [
         "button.apd-expand-toggle-button",
@@ -149,7 +184,7 @@ def process_single_activity(activity, activity_num, total_activities):
             except Exception as e:
                 continue
 
-    # Try to find and click play button
+    # Try to find and click play button to trigger audio download
     play_buttons = [
         "button.play-audio-button",
         "button[aria-label*='play']",
@@ -161,15 +196,16 @@ def process_single_activity(activity, activity_num, total_activities):
             try:
                 print("      🎵 Clicking play button...")
                 activity.locator(play_selector).first.click()
-                time.sleep(3)
+                time.sleep(3)  # Wait for audio to be detected
                 break
             except Exception as e:
                 continue
     
-    # Show what we saved for this activity
+    # Check what audio URLs were saved during this activity
     saved_after = len(PROCESSED_URLS)
     new_saved = saved_after - saved_before
     
+    # Show results for this activity
     if new_saved > 0:
         print(f"      ✅ Saved {new_saved} new audio URL(s)")
     else:
@@ -177,22 +213,20 @@ def process_single_activity(activity, activity_num, total_activities):
     
     return True
 
-def initialize_audio_file(clear_existing=False):
-    """Initialize the audio URLs file - optionally clear existing data"""
-    audio_urls_path = os.path.join("backend", "audio_urls.json")
-    
+def initialize_output_files(clear_existing=False):
+    """Initialize all output files"""
     # Create backend directory if it doesn't exist
-    os.makedirs(os.path.dirname(audio_urls_path), exist_ok=True)
+    os.makedirs(os.path.dirname(AUDIO_URLS_FILE), exist_ok=True)
     
-    if clear_existing or not os.path.exists(audio_urls_path):
-        # Start with empty file
-        with open(audio_urls_path, "w") as f:
+    # Initialize audio URLs file
+    if clear_existing or not os.path.exists(AUDIO_URLS_FILE):
+        with open(AUDIO_URLS_FILE, "w") as f:
             json.dump([], f, indent=2)
         print("   📁 Created new/cleared audio URLs file")
         PROCESSED_URLS.clear()
     else:
         try:
-            with open(audio_urls_path, "r") as f:
+            with open(AUDIO_URLS_FILE, "r") as f:
                 existing = json.load(f)
             print(f"   📁 Existing audio URLs file loaded with {len(existing)} URLs")
             # Add existing URLs to processed set to avoid duplicates
@@ -200,9 +234,12 @@ def initialize_audio_file(clear_existing=False):
                 PROCESSED_URLS.add(url)
         except (json.JSONDecodeError, Exception) as e:
             # If file is corrupted, reset it
-            with open(audio_urls_path, "w") as f:
+            with open(AUDIO_URLS_FILE, "w") as f:
                 json.dump([], f, indent=2)
             print(f"   🔄 Reset corrupted audio URLs file: {e}")
+    
+    # Clear transcripts list
+    ALL_TRANSCRIPTS.clear()
 
 def scroll_to_load_more(page):
     """Scroll to bottom to load more activities"""
@@ -210,16 +247,9 @@ def scroll_to_load_more(page):
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     time.sleep(3)  # Wait for new content to load
 
-def has_more_activities(page, current_count):
-    """Check if there are more activities to load after scrolling"""
-    new_activities = find_all_activities(page)
-    if new_activities and new_activities.count() > current_count:
-        return True
-    return False
-
-def continuous_load_and_process(page):
-    """Continuously load and process activities in batches"""
-    print("🔄 Starting continuous loading and processing...")
+def continuous_load_and_process_combined(page):
+    """Continuously load and process activities in batches - combined audio and transcripts"""
+    print("🔄 Starting continuous loading and processing (audio + transcripts)...")
     
     total_processed = 0
     batch_count = 0
@@ -250,10 +280,13 @@ def continuous_load_and_process(page):
             for i in range(start_index, end_index):
                 try:
                     activity = activities.nth(i)
-                    process_single_activity(activity, i + 1, current_activity_count)
+                    process_single_activity_combined(activity, i + 1, current_activity_count)
                     total_processed += 1
                 except Exception as e:
                     print(f"   ❌ Error processing activity {i + 1}: {e}")
+                    # Add error entry to transcripts
+                    ALL_TRANSCRIPTS.append(f"--- Activity {i + 1} [Error: {e}] ---\n")
+                    total_processed += 1
                     continue
         
         print(f"   ✅ Processed {end_index - start_index} activities in this batch")
@@ -279,16 +312,26 @@ def continuous_load_and_process(page):
     
     return total_processed
 
+def save_final_outputs():
+    """Save all final output files"""
+    # Save transcripts to text file
+    print("📝 Saving transcripts to text file...")
+    with open(TRANSCRIPTS_FILE, "w", encoding="utf-8") as f:
+        for transcript in ALL_TRANSCRIPTS:
+            f.write(transcript + "\n")
+    
+    # Audio URLs are already saved incrementally during processing
+
 # ========== MAIN EXECUTION ==========
-print("🚀 Starting Alexa Audio URL Extraction")
+print("🚀 Starting Combined Alexa Audio & Transcript Extraction")
 print("=" * 50)
-print("💡 CONTINUOUS LOADING: Process in batches and scroll for more!")
+print("💡 COMBINED APPROACH: Extract audio and transcripts together!")
 print("=" * 50)
 
 with sync_playwright() as p:
-    # Initialize the audio file - start FRESH each time
-    print("📁 Initializing audio URLs file...")
-    initialize_audio_file(clear_existing=True)
+    # Initialize all output files
+    print("📁 Initializing output files...")
+    initialize_output_files(clear_existing=True)
 
     # Launch the browser
     browser = p.chromium.launch(headless=False)
@@ -349,49 +392,54 @@ with sync_playwright() as p:
             break
 
     if no_records_found:
-        print("📝 No audio URLs to extract. The audio URLs file has been cleared.")
+        print("📝 No data to extract. All output files have been cleared.")
         browser.close()
         exit(0)
 
     # Process all activities with continuous loading
-    print("\n🎯 STARTING CONTINUOUS PROCESSING")
+    print("\n🎯 STARTING CONTINUOUS COMBINED PROCESSING")
     print("-" * 40)
     
-    total_processed = continuous_load_and_process(page)
+    total_processed = continuous_load_and_process_combined(page)
 
     print(f"\n📊 PROCESSING COMPLETE")
     print("-" * 40)
     print(f"   • Total activities processed: {total_processed}")
     print(f"   • Total unique URLs processed: {len(PROCESSED_URLS)}")
+    print(f"   • Transcripts extracted: {len(ALL_TRANSCRIPTS)}")
 
     # Final wait for any remaining audio URLs
     print("⏳ Finalizing: Waiting for any remaining audio URLs...")
     time.sleep(5)
 
-    # Read the final results from the file
-    audio_urls_path = os.path.join("backend", "audio_urls.json")
-    with open(audio_urls_path, "r") as f:
-        final_urls = json.load(f)
+    # Save all final outputs
+    save_final_outputs()
+
+    # Read final results for statistics
+    with open(AUDIO_URLS_FILE, "r") as f:
+        final_audio_urls = json.load(f)
+
+    # Calculate statistics
+    audio_extracted_count = len(final_audio_urls)
+    transcript_extracted_count = len(ALL_TRANSCRIPTS)
 
     print(f"\n✅ EXTRACTION COMPLETE!")
     print("=" * 50)
     print(f"📊 FINAL STATISTICS:")
     print(f"   • Total activities processed: {total_processed}")
-    print(f"   • Unique audio URLs saved: {len(final_urls)}")
+    print(f"   • Unique audio URLs saved: {audio_extracted_count}")
+    print(f"   • Transcripts extracted: {transcript_extracted_count}")
     
-    # Calculate extraction rate
+    # Calculate extraction rates
     if total_processed > 0:
-        extraction_rate = (len(final_urls) / total_processed) * 100
-        print(f"   • Extraction rate: {extraction_rate:.1f}%")
+        audio_rate = (audio_extracted_count / total_processed) * 100
+        transcript_rate = (transcript_extracted_count / total_processed) * 100
+        print(f"   • Audio extraction rate: {audio_rate:.1f}%")
+        print(f"   • Transcript extraction rate: {transcript_rate:.1f}%")
     
-    if final_urls:
-        print(f"\n🎵 EXTRACTED AUDIO URLs ({len(final_urls)}):")
-        for i, url in enumerate(final_urls, 1):
-            print(f"    {i:2d}. {url}")
-    else:
-        print("   ℹ️ No audio URLs were extracted")
-    
-    print(f"\n💾 Saved to: {audio_urls_path}")
+    print(f"\n💾 OUTPUT FILES:")
+    print(f"   • Audio URLs: {AUDIO_URLS_FILE}")
+    print(f"   • Transcripts: {TRANSCRIPTS_FILE}")
     print("=" * 50)
 
     # Close browser
