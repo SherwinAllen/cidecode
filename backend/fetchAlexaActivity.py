@@ -111,6 +111,39 @@ def intercept_response(response):
         if "redirect" not in str(e).lower():
             print(f"   ⚠️ Error processing response: {e}")
 
+def wait_for_page_to_load(page, timeout=30):
+    """Wait for the page to fully load and become interactive"""
+    print("⏳ Waiting for page to fully load...")
+    
+    # Wait for network to be mostly idle
+    page.wait_for_load_state('networkidle', timeout=timeout * 1000)
+    print("   ✅ Network is idle")
+    
+    # Additional wait for DOM stability
+    time.sleep(3)
+    
+    # Check for specific elements that indicate the page is ready
+    selectors_to_wait_for = [
+        "div.apd-content-box.with-activity-page",
+        ".apd-content-box.with-activity-page", 
+        "[class*='apd-content-box']",
+        "text=No voice recordings found",
+        "text=No activities found", 
+        "text=No records found"
+    ]
+    
+    for selector in selectors_to_wait_for:
+        try:
+            page.wait_for_selector(selector, timeout=10000)
+            print(f"   ✅ Found element: {selector}")
+            return True
+        except:
+            continue
+    
+    # If we get here, none of the specific selectors were found, but we'll proceed anyway
+    print("   ⚠️ No specific activity elements found, but proceeding...")
+    return True
+
 def find_all_activities(page):
     """Find all activity containers on the page"""
     selectors = [
@@ -361,8 +394,8 @@ with sync_playwright() as p:
         page.goto("https://www.amazon.in/alexa-privacy/apd/rvh", wait_until="domcontentloaded")
         print("✅ Page loaded successfully")
         
-        # Wait for page to be interactive
-        time.sleep(3)
+        # ADDED: Wait for page to fully load before processing
+        wait_for_page_to_load(page, timeout=30)
         
         # Check if we're actually on the right page and logged in
         if "signin" in page.url or page.locator("input#ap_email").count() > 0:
@@ -395,6 +428,10 @@ with sync_playwright() as p:
         print("📝 No data to extract. All output files have been cleared.")
         browser.close()
         exit(0)
+
+    # ADDED: Additional wait before starting processing
+    print("⏳ Final preparation before starting extraction...")
+    time.sleep(5)
 
     # Process all activities with continuous loading
     print("\n🎯 STARTING CONTINUOUS COMBINED PROCESSING")
