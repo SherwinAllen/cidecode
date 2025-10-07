@@ -111,38 +111,68 @@ def intercept_response(response):
         if "redirect" not in str(e).lower():
             print(f"   ⚠️ Error processing response: {e}")
 
-def wait_for_page_to_load(page, timeout=30):
-    """Wait for the page to fully load and become interactive"""
-    print("⏳ Waiting for page to fully load...")
+def quick_check_no_records(page):
+    """Quick check for 'No records found' text - optimized for speed"""
+    print("🔍 Quick checking for 'No records found'...")
     
-    # Wait for network to be mostly idle
-    page.wait_for_load_state('networkidle', timeout=timeout * 1000)
-    print("   ✅ Network is idle")
-    
-    # Additional wait for DOM stability
-    time.sleep(3)
-    
-    # Check for specific elements that indicate the page is ready
-    selectors_to_wait_for = [
-        "div.apd-content-box.with-activity-page",
-        ".apd-content-box.with-activity-page", 
-        "[class*='apd-content-box']",
-        "text=No voice recordings found",
-        "text=No activities found", 
-        "text=No records found"
-    ]
-    
-    for selector in selectors_to_wait_for:
-        try:
-            page.wait_for_selector(selector, timeout=10000)
-            print(f"   ✅ Found element: {selector}")
+    try:
+        # Method 1: Direct text content check (fastest)
+        page_content = page.content()
+        if "No records found" in page_content:
+            print("✅ QUICK CHECK: 'No records found' detected in page content")
             return True
-        except:
-            continue
+            
+        # Method 2: Fast selector check with short timeout
+        no_records_element = page.locator("text=No records found")
+        if no_records_element.count() > 0:
+            print("✅ QUICK CHECK: 'No records found' element found")
+            return True
+            
+        return False
+        
+    except Exception as e:
+        print(f"⚠️ Quick check error: {e}")
+        return False
+
+def wait_for_page_to_load_optimized(page, timeout=15):
+    """Optimized page load wait - much faster"""
+    print("⏳ Optimized page loading wait...")
     
-    # If we get here, none of the specific selectors were found, but we'll proceed anyway
-    print("   ⚠️ No specific activity elements found, but proceeding...")
-    return True
+    try:
+        # Wait for DOM content first (much faster than networkidle)
+        page.wait_for_load_state('domcontentloaded', timeout=timeout * 1000)
+        print("   ✅ DOM content loaded")
+        
+        # Quick check for no records immediately after DOM load
+        if quick_check_no_records(page):
+            return "no_records"
+            
+        # Short wait for key elements to appear
+        key_selectors = [
+            "div.apd-content-box.with-activity-page",
+            ".apd-content-box.with-activity-page",
+            "[class*='apd-content-box']"
+        ]
+        
+        # Try each selector with short timeout
+        for selector in key_selectors:
+            try:
+                page.wait_for_selector(selector, timeout=5000)
+                print(f"   ✅ Found activity element: {selector}")
+                return "has_activities"
+            except:
+                continue
+        
+        # Final quick check for no records
+        if quick_check_no_records(page):
+            return "no_records"
+            
+        print("   ⚠️ No specific elements found quickly, but proceeding...")
+        return "unknown"
+        
+    except Exception as e:
+        print(f"   ⚠️ Page load wait interrupted: {e}")
+        return "unknown"
 
 def find_all_activities(page):
     """Find all activity containers on the page"""
@@ -355,6 +385,16 @@ def save_final_outputs():
     
     # Audio URLs are already saved incrementally during processing
 
+def write_no_records_message():
+    """Write a message to transcript file when no records are found"""
+    print("📝 Writing 'no records found' message to transcript file...")
+    with open(TRANSCRIPTS_FILE, "w", encoding="utf-8") as f:
+        f.write("=== Alexa Activity Log ===\n")
+        f.write("Date: " + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+        f.write("Status: No voice recordings found\n")
+        f.write("Message: This is normal if you haven't used any Amazon voice-enabled devices recently.\n")
+        f.write("=" * 40 + "\n")
+
 # ========== MAIN EXECUTION ==========
 print("🚀 Starting Combined Alexa Audio & Transcript Extraction")
 print("=" * 50)
@@ -394,8 +434,8 @@ with sync_playwright() as p:
         page.goto("https://www.amazon.in/alexa-privacy/apd/rvh", wait_until="domcontentloaded")
         print("✅ Page loaded successfully")
         
-        # ADDED: Wait for page to fully load before processing
-        wait_for_page_to_load(page, timeout=30)
+        # OPTIMIZED: Use faster page load detection
+        page_status = wait_for_page_to_load_optimized(page, timeout=15)
         
         # Check if we're actually on the right page and logged in
         if "signin" in page.url or page.locator("input#ap_email").count() > 0:
@@ -408,30 +448,25 @@ with sync_playwright() as p:
         browser.close()
         exit(1)
 
-    # Check for "no records" scenario first
-    print("🔍 Checking for voice recordings...")
-    no_records_selectors = [
-        "text=No voice recordings found",
-        "text=No activities found", 
-        "text=No records found",
-        "text=You haven't interacted with Alexa"
-    ]
-    
-    no_records_found = False
-    for selector in no_records_selectors:
-        if page.locator(selector).count() > 0:
-            print("✅ No voice records found. This is normal if you haven't used Alexa.")
-            no_records_found = True
-            break
-
-    if no_records_found:
-        print("📝 No data to extract. All output files have been cleared.")
+    # OPTIMIZED: Check page status from the optimized loader
+    if page_status == "no_records":
+        # Write the "no records" message to transcript file
+        write_no_records_message()
+        print("📝 No data to extract. Transcript file updated with 'no records' message.")
         browser.close()
         exit(0)
-
-    # ADDED: Additional wait before starting processing
-    print("⏳ Final preparation before starting extraction...")
-    time.sleep(5)
+    elif page_status == "has_activities":
+        print("✅ Activities detected, proceeding with extraction...")
+    else:
+        # Fallback: Quick final check for no records
+        print("🔍 Final quick check for records...")
+        if quick_check_no_records(page):
+            write_no_records_message()
+            print("📝 No data to extract. Transcript file updated with 'no records' message.")
+            browser.close()
+            exit(0)
+        else:
+            print("✅ Proceeding with extraction (no quick 'no records' detected)...")
 
     # Process all activities with continuous loading
     print("\n🎯 STARTING CONTINUOUS COMBINED PROCESSING")

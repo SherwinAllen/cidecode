@@ -27,7 +27,6 @@ function generateCredentialsHash(email, password) {
 const currentCredentialsHash = generateCredentialsHash(AMAZON_EMAIL, AMAZON_PASSWORD);
 
 // URLs for Amazon homepage and Alexa activity page
-const homeUrl = 'https://www.amazon.in';
 const activityUrl = 'https://www.amazon.in/alexa-privacy/apd/rvh';
 
 // Profile management functions
@@ -87,16 +86,6 @@ function cleanupProfileIfNeeded() {
   }
 }
 
-function waitForUserPrompt(promptText = 'Press Enter when you have completed the required action in the browser...') {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(`${promptText}\n`, () => {
-      rl.close();
-      resolve();
-    });
-  });
-}
-
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Check if we're on target page
@@ -109,41 +98,41 @@ async function isOnTargetPage(driver) {
   }
 }
 
-// Check if re-authentication is needed
-async function isReAuthPage(driver) {
+// Check if we're on 2FA/OTP page
+async function isOn2FAPage(driver) {
   try {
     const currentUrl = await driver.getCurrentUrl();
     
-    // Check for password field specifically for re-auth
-    const passwordSelectors = [
-      'input[name="password"][type="password"]',
-      '#ap_password',
-      'input[type="password"]'
+    // Check for OTP/2FA indicators
+    const otpIndicators = [
+      "//*[contains(text(), 'Enter OTP')]",
+      "//*[contains(text(), 'One Time Password')]",
+      "//*[contains(text(), 'verification code')]",
+      "//*[contains(text(), 'Two-Step Verification')]",
+      "//*[contains(text(), 'approval')]",
+      '#auth-mfa-otpcode',
+      'input[name="otpCode"]',
+      'input[name="code"]'
     ];
     
-    let hasPasswordField = false;
-    for (const sel of passwordSelectors) {
+    // Check for OTP input fields
+    const otpInputSelectors = [
+      '#auth-mfa-otpcode',
+      'input[name="otpCode"]',
+      'input[name="code"]',
+      'input[type="tel"]',
+      'input[inputmode="numeric"]'
+    ];
+    
+    for (const sel of otpInputSelectors) {
       const elements = await driver.findElements(By.css(sel));
       if (elements.length > 0) {
-        hasPasswordField = true;
-        break;
+        return true;
       }
     }
     
-    if (!hasPasswordField) {
-      return false;
-    }
-    
-    // Additional checks for re-auth context
-    const reAuthIndicators = [
-      "//*[contains(text(), 'Enter your password')]",
-      "//*[contains(text(), 'Re-enter your password')]",
-      "//*[contains(text(), 'password again')]",
-      "//*[contains(text(), 'verify your password')]",
-      "//*[contains(text(), 'confirm your password')]"
-    ];
-    
-    for (const xpath of reAuthIndicators) {
+    // Check for OTP text indicators
+    for (const xpath of otpIndicators) {
       try {
         const elements = await driver.findElements(By.xpath(xpath));
         if (elements.length > 0) {
@@ -152,23 +141,151 @@ async function isReAuthPage(driver) {
       } catch (e) {}
     }
     
-    // Check if we can see the user's email
+    return currentUrl.includes('/ap/') && 
+           (currentUrl.includes('mfa') || 
+            currentUrl.includes('otp') || 
+            currentUrl.includes('verify'));
+    
+  } catch (error) {
+    return false;
+  }
+}
+
+// Wait for redirection to target page after 2FA
+async function waitForRedirectAfter2FA(driver, timeout = 120000) {
+  console.log('⏳ Waiting for automatic redirection to activity page after 2FA...');
+  
+  const startTime = Date.now();
+  
+  while (Date.now() - startTime < timeout) {
     try {
-      const emailDisplay = await driver.findElements(By.xpath("//*[contains(text(), '" + AMAZON_EMAIL + "')]"));
-      if (emailDisplay.length > 0) {
+      // Check if we're on target page
+      if (await isOnTargetPage(driver)) {
+        console.log('✅ Automatic redirection detected! Now on target page.');
         return true;
       }
-    } catch (e) {}
+      
+      // Check if we're still on 2FA page
+      if (!await isOn2FAPage(driver)) {
+        // If we're not on 2FA page and not on target page, we might be in transition
+        console.log('🔄 2FA completed, waiting for final redirection...');
+        await sleep(2000);
+        continue;
+      }
+      
+      // Still on 2FA page, wait a bit
+      await sleep(3000);
+      
+    } catch (error) {
+      // If there's an error checking the page, wait and continue
+      await sleep(3000);
+    }
+  }
+  
+  console.log('❌ Timeout waiting for automatic redirection after 2FA');
+  return false;
+}
+
+// NEW: Check if this is truly a re-authentication scenario
+async function isTrueReAuthScenario(driver) {
+  try {
+    const currentUrl = await driver.getCurrentUrl();
     
-    // If we have a password field and we're on an Amazon auth page, it's likely re-auth
-    if (currentUrl.includes('/ap/') && hasPasswordField) {
+    // Must be on an Amazon authentication page
+    if (!currentUrl.includes('/ap/')) {
+      return false;
+    }
+    
+    // Check for password field
+    const hasPasswordField = await driver.findElements(By.css('input[type="password"]'))
+      .then(elements => elements.length > 0);
+    
+    if (!hasPasswordField) {
+      return false;
+    }
+    
+    // Check if user email is already displayed (indicating partial session)
+    const userEmailDisplayed = await driver.findElements(By.xpath(`//*[contains(text(), "${AMAZON_EMAIL}")]`))
+      .then(elements => elements.length > 0);
+    
+    // Check for "Hello, [name]" or similar session indicators
+    const sessionIndicators = [
+      "//*[contains(text(), 'Hello,')]",
+      "//*[contains(text(), 'Welcome,')]",
+      "//*[contains(text(), 'signed in as')]"
+    ];
+    
+    let hasSessionIndicator = false;
+    for (const xpath of sessionIndicators) {
+      const elements = await driver.findElements(By.xpath(xpath));
+      if (elements.length > 0) {
+        hasSessionIndicator = true;
+        break;
+      }
+    }
+    
+    // True re-auth: we have password field AND some session indicator
+    return hasPasswordField && (userEmailDisplayed || hasSessionIndicator);
+    
+  } catch (error) {
+    return false;
+  }
+}
+
+// OPTIMIZED: Check if we need full login (more comprehensive)
+async function needsFullLogin(driver) {
+  try {
+    const currentUrl = await driver.getCurrentUrl();
+    
+    // If we're already on target page, no login needed
+    if (await isOnTargetPage(driver)) {
+      return false;
+    }
+    
+    // Check for email field (strong indicator of full login)
+    const emailSelectors = [
+      '#ap_email',
+      'input[name="email"]',
+      'input[type="email"]',
+      '#ap_email_login'
+    ];
+    
+    for (const sel of emailSelectors) {
+      const elements = await driver.findElements(By.css(sel));
+      for (const element of elements) {
+        if (await element.isDisplayed()) {
+          console.log('🔐 Found email field - full login required');
+          return true;
+        }
+      }
+    }
+    
+    // Check if we're on a clear login page (not re-auth)
+    const loginPageIndicators = [
+      "//*[contains(text(), 'Sign in')]",
+      "//*[contains(text(), 'Login')]",
+      "//*[contains(text(), 'Create account')]"
+    ];
+    
+    let hasLoginPageIndicator = false;
+    for (const xpath of loginPageIndicators) {
+      const elements = await driver.findElements(By.xpath(xpath));
+      if (elements.length > 0) {
+        hasLoginPageIndicator = true;
+        break;
+      }
+    }
+    
+    // If we have login page indicators but no session indicators, it's likely full login
+    if (hasLoginPageIndicator && !await isTrueReAuthScenario(driver)) {
+      console.log('🔐 Login page detected - full login required');
       return true;
     }
     
     return false;
-    
   } catch (error) {
-    return false;
+    // If we can't determine, assume full login for safety
+    return true;
   }
 }
 
@@ -177,9 +294,9 @@ async function handleReAuth(driver) {
   console.log('=== STARTING RE-AUTHENTICATION ===');
   
   try {
-    await sleep(2000);
+    await sleep(3000);
     
-    // Find password field
+    // Wait for password field to be interactable
     const passwordSelectors = [
       'input[name="password"][type="password"]',
       '#ap_password', 
@@ -189,63 +306,88 @@ async function handleReAuth(driver) {
     let passwordField = null;
     for (const sel of passwordSelectors) {
       try {
+        await driver.wait(until.elementLocated(By.css(sel)), 10000);
         const elements = await driver.findElements(By.css(sel));
-        if (elements.length > 0) {
-          passwordField = elements[0];
-          break;
+        for (const element of elements) {
+          if (await element.isDisplayed() && await element.isEnabled()) {
+            passwordField = element;
+            break;
+          }
         }
+        if (passwordField) break;
       } catch (e) {}
     }
     
     if (!passwordField) {
-      console.error('❌ Could not find password field for re-auth');
+      console.error('❌ Could not find interactable password field for re-auth');
       return false;
     }
     
-    // Clear and enter password
-    await passwordField.clear();
+    await sleep(1000);
+    
+    try {
+      await driver.executeScript("arguments[0].value = '';", passwordField);
+    } catch (e) {
+      try {
+        await passwordField.clear();
+      } catch (clearError) {
+        console.log('Could not clear field, continuing...');
+      }
+    }
+    
     await passwordField.sendKeys(AMAZON_PASSWORD);
     console.log('✅ Password entered');
     
-    // Find submit button
+    // Find and click submit button
     const submitSelectors = [
       '#signInSubmit',
       'input[type="submit"]',
       'button[type="submit"]',
       'input[value="Sign in"]',
-      'button[value="Sign in"]'
+      'button[contains(text(), "Sign in")]',
+      '.a-button-input[type="submit"]'
     ];
     
     let submitButton = null;
     for (const sel of submitSelectors) {
       try {
         const elements = await driver.findElements(By.css(sel));
-        if (elements.length > 0) {
-          submitButton = elements[0];
-          break;
+        for (const element of elements) {
+          if (await element.isDisplayed() && await element.isEnabled()) {
+            submitButton = element;
+            break;
+          }
         }
+        if (submitButton) break;
       } catch (e) {}
     }
     
     if (submitButton) {
       await submitButton.click();
+      console.log('✅ Submit button clicked');
     } else {
-      // Fallback: press Enter
       await passwordField.sendKeys('\n');
+      console.log('✅ Enter key pressed');
     }
     
-    // Wait for result
+    // Wait for result and handle potential 2FA
     console.log('Waiting for re-authentication result...');
-    await sleep(5000);
+    await sleep(8000);
+    
+    // Check if we need 2FA
+    if (await isOn2FAPage(driver)) {
+      console.log('🔐 2FA detected in re-authentication flow...');
+      console.log('Please complete 2FA/OTP in the browser');
+      const redirectSuccess = await waitForRedirectAfter2FA(driver);
+      return redirectSuccess;
+    }
     
     // Check if we're now on the target page
-    const currentUrl = await driver.getCurrentUrl();
-    
-    if (currentUrl.includes('/alexa-privacy/apd/')) {
+    if (await isOnTargetPage(driver)) {
       console.log('✅ Re-authentication successful! Reached target page.');
       return true;
     } else {
-      console.log('❌ Re-authentication failed');
+      console.log('❌ Re-authentication may have failed - not on target page');
       return false;
     }
     
@@ -255,92 +397,168 @@ async function handleReAuth(driver) {
   }
 }
 
-// Check if we need full login
-async function needsFullLogin(driver) {
-  try {
-    const currentUrl = await driver.getCurrentUrl();
-    
-    // Check for email field (indicates full login needed)
-    const emailSelectors = [
-      '#ap_email',
-      'input[name="email"]',
-      'input[type="email"]'
-    ];
-    
-    for (const sel of emailSelectors) {
-      const elements = await driver.findElements(By.css(sel));
-      if (elements.length > 0) {
-        console.log('Found email field - full login required');
-        return true;
-      }
-    }
-    
-    return false;
-  } catch (error) {
-    return true;
-  }
-}
-
 // Perform full authentication
 async function performFullAuthentication(driver) {
   console.log('=== STARTING FULL AUTHENTICATION ===');
   
   try {
-    // Navigate to home first to start fresh
-    await driver.get(homeUrl);
+    // We're already on the login page from activityURL redirect
     await sleep(3000);
     
-    // Look for and click sign-in link
-    try {
-      const signInLink = await driver.findElement(By.id('nav-link-accountList'));
-      await signInLink.click();
-      console.log('Clicked sign-in link');
-      await sleep(3000);
-    } catch (e) {
-      console.log('Sign-in link not found, continuing...');
+    // Wait for and enter email
+    const emailSelectors = [
+      '#ap_email',
+      'input[name="email"]',
+      'input[type="email"]',
+      '#ap_email_login'
+    ];
+    
+    let emailField = null;
+    for (const sel of emailSelectors) {
+      try {
+        await driver.wait(until.elementLocated(By.css(sel)), 10000);
+        const elements = await driver.findElements(By.css(sel));
+        for (const element of elements) {
+          if (await element.isDisplayed() && await element.isEnabled()) {
+            emailField = element;
+            break;
+          }
+        }
+        if (emailField) break;
+      } catch (e) {}
     }
     
-    // Enter email
-    const emailField = await driver.findElement(By.id('ap_email'));
+    if (!emailField) {
+      console.error('❌ Could not find email field');
+      return false;
+    }
+    
     await emailField.clear();
     await emailField.sendKeys(AMAZON_EMAIL);
-    console.log('Entered email');
+    console.log('✅ Entered email');
     
-    // Click continue
-    try {
-      const continueButton = await driver.findElement(By.id('continue'));
-      await continueButton.click();
-    } catch (e) {
-      // Try pressing Enter
-      await emailField.sendKeys('\n');
+    // Click continue or press enter
+    const continueSelectors = [
+      '#continue',
+      'input[type="submit"]',
+      'button[type="submit"]',
+      '.a-button-input[type="submit"]'
+    ];
+    
+    let continueButton = null;
+    for (const sel of continueSelectors) {
+      try {
+        const elements = await driver.findElements(By.css(sel));
+        for (const element of elements) {
+          if (await element.isDisplayed() && await element.isEnabled()) {
+            continueButton = element;
+            break;
+          }
+        }
+        if (continueButton) break;
+      } catch (e) {}
     }
+    
+    if (continueButton) {
+      await continueButton.click();
+      console.log('✅ Continue button clicked');
+    } else {
+      await emailField.sendKeys('\n');
+      console.log('✅ Enter key pressed for continue');
+    }
+    
     await sleep(3000);
     
     // Enter password
-    const passwordField = await driver.findElement(By.id('ap_password'));
+    const passwordSelectors = [
+      '#ap_password',
+      'input[name="password"]',
+      'input[type="password"]'
+    ];
+    
+    let passwordField = null;
+    for (const sel of passwordSelectors) {
+      try {
+        await driver.wait(until.elementLocated(By.css(sel)), 10000);
+        const elements = await driver.findElements(By.css(sel));
+        for (const element of elements) {
+          if (await element.isDisplayed() && await element.isEnabled()) {
+            passwordField = element;
+            break;
+          }
+        }
+        if (passwordField) break;
+      } catch (e) {}
+    }
+    
+    if (!passwordField) {
+      console.error('❌ Could not find password field');
+      return false;
+    }
+    
     await passwordField.clear();
     await passwordField.sendKeys(AMAZON_PASSWORD);
-    console.log('Entered password');
+    console.log('✅ Entered password');
     
     // Click sign-in
-    const signInButton = await driver.findElement(By.id('signInSubmit'));
-    await signInButton.click();
-    console.log('Clicked sign-in button');
+    const signInSelectors = [
+      '#signInSubmit',
+      'input[type="submit"]',
+      'button[type="submit"]',
+      'input[value="Sign in"]'
+    ];
     
-    // Wait for login to complete
+    let signInButton = null;
+    for (const sel of signInSelectors) {
+      try {
+        const elements = await driver.findElements(By.css(sel));
+        for (const element of elements) {
+          if (await element.isDisplayed() && await element.isEnabled()) {
+            signInButton = element;
+            break;
+          }
+        }
+        if (signInButton) break;
+      } catch (e) {}
+    }
+    
+    if (signInButton) {
+      await signInButton.click();
+      console.log('✅ Sign-in button clicked');
+    } else {
+      await passwordField.sendKeys('\n');
+      console.log('✅ Enter key pressed for sign-in');
+    }
+    
+    // Wait for login to complete and handle 2FA automatically
     console.log('Waiting for login to complete...');
     await sleep(10000);
     
-    // Handle potential 2FA or other challenges
-    const currentUrl = await driver.getCurrentUrl();
-    if (currentUrl.includes('/ap/')) {
-      console.log('Additional authentication may be required');
-      console.log('Please complete any CAPTCHA, OTP, or approval in the browser');
-      await waitForUserPrompt('Press Enter after completing authentication in the browser...');
+    // Check if we need 2FA/OTP
+    if (await isOn2FAPage(driver)) {
+      console.log('🔐 2FA/OTP authentication required...');
+      console.log('Please complete the 2FA/OTP verification in the browser');
+      console.log('The script will automatically detect when you are redirected to the activity page');
+      
+      // Wait for automatic redirection after 2FA completion
+      const redirectSuccess = await waitForRedirectAfter2FA(driver);
+      if (redirectSuccess) {
+        console.log('✅ 2FA completed and automatic redirection detected!');
+        return true;
+      } else {
+        console.log('❌ 2FA may have failed or timed out');
+        return false;
+      }
     }
     
-    console.log('✅ Full authentication completed');
-    return true;
+    // If no 2FA needed, check if we're on target page
+    if (await isOnTargetPage(driver)) {
+      console.log('✅ Full authentication completed and reached target page!');
+      return true;
+    } else {
+      console.log('❌ Authentication may have failed - not on target page');
+      return false;
+    }
     
   } catch (error) {
     console.error('❌ Full authentication failed:', error);
@@ -370,31 +588,32 @@ async function performFullAuthentication(driver) {
     
     let needFinalNavigation = false;
     
-    // Step 2: Check current state and handle authentication if needed
-    console.log('2. Checking current state...');
+    // Step 2: OPTIMIZED - Check current state with better detection
+    console.log('2. Checking authentication state...');
     
     if (await isOnTargetPage(driver)) {
       console.log('✅ Already on target page!');
-      // No authentication needed, no final navigation needed
+      // No authentication needed
     } 
-    else if (await isReAuthPage(driver)) {
+    // OPTIMIZED: Check for full login FIRST (most common scenario for first run)
+    else if (await needsFullLogin(driver)) {
+      console.log('🔐 Full authentication required...');
+      await performFullAuthentication(driver);
+      needFinalNavigation = true;
+    }
+    // Only then check for true re-authentication
+    else if (await isTrueReAuthScenario(driver)) {
       console.log('🔄 Re-authentication required...');
       const reAuthSuccess = await handleReAuth(driver);
       
       if (!reAuthSuccess || !await isOnTargetPage(driver)) {
         console.log('❌ Re-authentication failed, trying full authentication...');
         await performFullAuthentication(driver);
-        needFinalNavigation = true; // After full auth, we need to navigate to target
+        needFinalNavigation = true;
       }
-      // If re-auth succeeded, we're already on target page - no navigation needed
-    }
-    else if (await needsFullLogin(driver)) {
-      console.log('🔐 Full authentication required...');
-      await performFullAuthentication(driver);
-      needFinalNavigation = true; // After full auth, we need to navigate to target
     }
     else {
-      console.log('❓ Unknown state, assuming authentication is needed...');
+      console.log('❓ Unknown state, assuming full authentication is needed...');
       await performFullAuthentication(driver);
       needFinalNavigation = true;
     }
@@ -421,8 +640,9 @@ async function performFullAuthentication(driver) {
       console.log('❌ Failed to reach Alexa activity page');
       const currentUrl = await driver.getCurrentUrl();
       console.log('Final URL:', currentUrl);
+      await driver.quit();
+      process.exit(1);
     }
-
   } catch (error) {
     console.error('💥 An error occurred:', error);
   } finally {

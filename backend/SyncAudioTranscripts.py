@@ -82,7 +82,6 @@ def extract_detailed_transcripts(file_path):
                     
                     # Handle the case where speaker, location, and device are all in one line
                     # Pattern: SpeakerNameLocation Device
-                    # Examples: "SherwinBangalore echoshow8", "Bangalore echoshow8"
                     
                     # Method 1: Try to split by known location names
                     locations = ["Bangalore", "Mumbai", "Delhi", "Chennai", "Kolkata", "Hyderabad"]
