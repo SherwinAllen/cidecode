@@ -16,10 +16,6 @@ const devices = [
     name: 'Smart Assistant', 
     image: 'https://img.freepik.com/premium-photo/voice-assistant-device-stands-illuminated-against-dark-background-artificial-intelligence-assistance_308548-6446.jpg'
   },
-  // { 
-  //   name: 'Smart Camera', 
-  //   image: 'https://img.freepik.com/premium-photo/ip-camera-placed-black-background_150418-645.jpg'
-  // },
   { 
     name: 'Smart Watch', 
     image: 'https://www.theproche.com/wp-content/uploads/2021/03/smart-watch.png'
