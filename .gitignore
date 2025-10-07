@@ -23,6 +23,7 @@ __pycache__/
 .env
 .env.local
 .venv_backend/
+backend/.env
 
 # -----------------------
 # OS / Editor / IDE
