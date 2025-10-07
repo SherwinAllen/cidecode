@@ -1,8 +1,12 @@
 To get started with this project, follow these steps:
 
-```git clone https://github.com/SherwinAllen/cidecode.git```
+```bash
+git clone https://github.com/SherwinAllen/cidecode.git
+```
 
-```cd cidecode```
+```bash
+cd cidecode
+```
 
 ---
 
@@ -12,8 +16,9 @@ Create a Python virtual environment for the backend (for isolation and dependenc
 ```bash
 cd backend
 python -m venv .venv
-source .venv/bin/activate  # On Mac/Linux
-# .venv\Scripts\activate   # On Windows
+source .venv/bin/activate      # On Mac/Linux
+# .venv\Scripts\activate       # On Windows
+# .venv\Scripts\Activate.ps1   # On Windows PowerShell
 ```
 
 > **Note:** Always ensure your backend server is running with the virtual environment activated.  
@@ -23,16 +28,25 @@ source .venv/bin/activate  # On Mac/Linux
 
 Setup node dependencies:
 
-```npm install```
+```bash
+npm install
+```
 
 Setup the backend dependencies:
 
-```pip install -r backend/requirements.txt```
+```bash
+pip install -r backend/requirements.txt
+```
+> **Note:** Configure the Environment Variables as shown in ```.env.example```
 
 To start the backend (with the virtual environment activated): 
 
-```node backend/server.js```
+```bash
+node backend/server.js
+```
 
 Then, open a new terminal, and launch the frontend using:
 
-```npm start```
+```bash
+npm start
+```
