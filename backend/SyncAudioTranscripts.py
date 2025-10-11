@@ -26,8 +26,7 @@ def extract_detailed_transcripts(file_path):
     - type: "spoken" if in quotes, "system" if not
     - timestamp: the formatted date and time
     - speaker: the detected speaker name (if present) or "undefined"
-    - location: the location (e.g., "Bangalore")
-    - device: the device name (e.g., "echoshow8")
+    - device: the device name (e.g., "Bangalore echoshow 8")
     """
     detailed_transcripts = []
     
@@ -49,7 +48,6 @@ def extract_detailed_transcripts(file_path):
             "type": "system",  # Default to system
             "timestamp": "",
             "speaker": "undefined",  # Use "undefined" instead of null
-            "location": "",
             "device": ""
         }
         
@@ -77,72 +75,39 @@ def extract_detailed_transcripts(file_path):
                 
                 # Check if there are more lines after timestamp
                 if j + 1 < len(lines):
-                    # This is the speaker/location/device line
+                    # This is the speaker/device line
                     info_line = lines[j + 1]
                     
-                    # Handle the case where speaker, location, and device are all in one line
-                    # Pattern: SpeakerNameLocation Device
-                    
-                    # Method 1: Try to split by known location names
-                    locations = ["Bangalore", "Mumbai", "Delhi", "Chennai", "Kolkata", "Hyderabad"]
-                    found_location = None
-                    
-                    for location in locations:
-                        if location in info_line:
-                            found_location = location
-                            break
-                    
-                    if found_location:
-                        activity_data["location"] = found_location
+                    # Pattern 1: SpeakerName + Device (e.g., "SherwinBangalore echoshow 8")
+                    # Extract speaker name (capitalized word at beginning)
+                    speaker_match = re.match(r'^([A-Z][a-z]+)', info_line)
+                    if speaker_match:
+                        speaker_name = speaker_match.group(1)
+                        activity_data["speaker"] = speaker_name
                         
-                        # Extract speaker (text before location)
-                        location_index = info_line.find(found_location)
-                        if location_index > 0:
-                            speaker_part = info_line[:location_index]
-                            if speaker_part:
-                                activity_data["speaker"] = speaker_part
-                        
-                        # Extract device (text after location)
-                        device_part = info_line[location_index + len(found_location):].strip()
+                        # The rest is the device name (may include location like "Bangalore")
+                        device_part = info_line[len(speaker_name):].strip()
                         if device_part:
                             activity_data["device"] = device_part
-                    else:
-                        # If no known location found, try alternative parsing
-                        # Split by space and assume first part might contain speaker+location
-                        parts = info_line.split()
-                        if len(parts) >= 2:
-                            # Last part is device
-                            activity_data["device"] = parts[-1]
-                            
-                            # The rest might contain speaker and location
-                            remaining = ' '.join(parts[:-1])
-                            # If it contains a space, it might be "Location Device" format
-                            if ' ' in remaining:
-                                activity_data["location"] = remaining.split()[0]
-                            else:
-                                # Try to extract speaker from concatenated string
-                                # Look for capitalization pattern: NameLocation
-                                match = re.match(r'^([A-Z][a-z]+)([A-Z][a-z]+)$', remaining)
-                                if match:
-                                    speaker, location = match.groups()
-                                    activity_data["speaker"] = speaker
-                                    activity_data["location"] = location
-                else:
-                    # No speaker line, extract location and device from timestamp line
-                    # Example: "Today 2:42 pm Bangalore echoshow8"
-                    timestamp_parts = line.split()
-                    if len(timestamp_parts) >= 5:
-                        # Find the location (it's after the time)
-                        # Look for the position after time (XX:XX pm/am)
-                        time_end_index = None
-                        for idx, part in enumerate(timestamp_parts):
-                            if ':' in part and idx > 0:
-                                time_end_index = idx + 1  # Include am/pm
-                                break
+                    
+                    # Pattern 2: Complex device names (e.g., "RajkumarRajkumar's 2nd Fire TV Edition TV")
+                    elif "'" in info_line or "Fire TV" in info_line:
+                        # Try to extract speaker from the beginning
+                        complex_speaker_match = re.match(r'^([A-Z][a-z]+)', info_line)
+                        if complex_speaker_match:
+                            speaker_name = complex_speaker_match.group(1)
+                            activity_data["speaker"] = speaker_name
                         
-                        if time_end_index and time_end_index + 1 < len(timestamp_parts):
-                            activity_data["location"] = timestamp_parts[time_end_index]
-                            activity_data["device"] = " ".join(timestamp_parts[time_end_index + 1:])
+                        # The entire line is essentially the device description
+                        activity_data["device"] = info_line
+                    
+                    # Pattern 3: If no clear speaker pattern, check if it's just a device name
+                    elif any(device_keyword in info_line.lower() for device_keyword in ['echo', 'fire tv', 'alexa', 'dot']):
+                        activity_data["device"] = info_line
+                    
+                    # Pattern 4: Default - use the whole line as device
+                    else:
+                        activity_data["device"] = info_line
                 
                 break
         
@@ -238,6 +203,17 @@ print(f"📊 Loaded {len(audio_urls)} audio URLs")
 print("📁 Loading and processing transcripts from alexa_activity_log.txt...")
 transcripts_data = extract_detailed_transcripts('alexa_activity_log.txt')
 print(f"📊 Loaded {len(transcripts_data)} transcripts")
+
+# Display sample of extracted data for verification
+print("\n🔍 Sample of extracted transcript data:")
+for i in range(min(5, len(transcripts_data))):
+    entry = transcripts_data[i]
+    print(f"   Activity {entry['activity_number']}:")
+    print(f"     Transcript: {entry['transcript']}")
+    print(f"     Type: {entry['type']}")
+    print(f"     Timestamp: {entry['timestamp']}")
+    print(f"     Speaker: {entry['speaker']}")
+    print(f"     Device: {entry['device']}")
 
 # Check if we have matching counts
 if len(audio_urls) != len(transcripts_data):
