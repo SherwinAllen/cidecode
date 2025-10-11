@@ -8,6 +8,7 @@ import {
   fancyHeadingStyle,
   spinnerStyle
 } from '../constants/styles';
+import { FaEye, FaEyeSlash } from 'react-icons/fa'; // Add this import at the top
 
 const SmartAssistant = () => {
   const [teamText, setTeamText] = useState('');
@@ -16,6 +17,7 @@ const SmartAssistant = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(true);  // Loading state added
+  const [showPassword, setShowPassword] = useState(false); // Add this state
   const navigate = useNavigate();
 
   const teamInfo = `Team Name: paidRTOS\nTeam Members:\n\t1. Shambo Sarkar\n\t2. Sathvik S\n\t3. Sherwin Allen\n\t4. Meeran Ahmed`;
@@ -40,8 +42,15 @@ const SmartAssistant = () => {
   // Function to acquire data and trigger a file download.
   // Pass email, password and source=SmartAssistant as query parameters.
   const handleAcquireData = async () => {
-    setDownloading(true);
     setError(null);
+
+    // Validation for empty fields
+    if (!email.trim() || !password.trim()) {
+      setError("Please fill in both Email and Password fields.");
+      return;
+    }
+
+    setDownloading(true);
     try {
       const response = await fetch('http://localhost:5000/api/packet-report', {
         method: 'POST',
@@ -92,10 +101,25 @@ const SmartAssistant = () => {
     boxShadow: '0 0 30px rgba(0,255,0,1)'
   };
 
-  // New input field style to suit the neon theme
-  const inputStyle = {
+  const inputWrapperStyle = {
     width: '80%',
-    padding: '15px 20px',
+    margin: '20px auto 0 auto',
+    display: 'block',
+    height: '56px',
+  };
+
+  const passwordWrapperStyle = {
+    width: '80%',
+    margin: '20px auto 0 auto',
+    position: 'relative',
+    display: 'block',
+    height: '56px',
+  };
+
+  const inputStyle = {
+    width: '100%',
+    boxSizing: 'border-box', // Add this line
+    padding: '15px 50px 15px 20px',
     backgroundColor: 'rgba(0, 0, 0, 0.8)',
     border: '2px solid #0f0',
     borderRadius: '10px',
@@ -103,9 +127,22 @@ const SmartAssistant = () => {
     fontSize: '1.2rem',
     fontFamily: "'Orbitron', sans-serif",
     textAlign: 'center',
-    margin: '20px auto',
-    display: 'block',
-    boxShadow: '0 0 10px rgba(0,255,0,0.5)'
+    boxShadow: '0 0 10px rgba(0,255,0,0.5)',
+    outline: 'none',
+  };
+
+  const eyeIconStyle = {
+    position: 'absolute',
+    right: '20px',
+    top: '50%',
+    transform: 'translateY(-50%)',
+    color: '#0f0',
+    cursor: 'pointer',
+    fontSize: '1.5rem',
+    zIndex: 2,
+    background: 'transparent',
+    border: 'none',
+    padding: 0,
   };
 
   if (loading) {
@@ -137,20 +174,33 @@ const SmartAssistant = () => {
         )}
 
         {/* Email and Password input fields */}
-        <input 
-          type="email"
-          placeholder="Email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          style={inputStyle}
-        />
-        <input 
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          style={inputStyle}
-        />
+        <div style={inputWrapperStyle}>
+          <input 
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            style={inputStyle}
+          />
+        </div>
+        <div style={passwordWrapperStyle}>
+          <input 
+            type={showPassword ? "text" : "password"}
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            style={inputStyle}
+          />
+          <button
+            type="button"
+            style={eyeIconStyle}
+            onClick={() => setShowPassword((prev) => !prev)}
+            tabIndex={0}
+            aria-label={showPassword ? "Hide password" : "Show password"}
+          >
+            {showPassword ? <FaEyeSlash /> : <FaEye />}
+          </button>
+        </div>
 
         <motion.button 
           onClick={handleAcquireData}
