@@ -43,9 +43,11 @@ const SmartAssistant = () => {
     setDownloading(true);
     setError(null);
     try {
-      // Build query parameters from email, password, and source identifier
-      const queryParams = new URLSearchParams({ email, password, source: 'SmartAssistant' });
-      const response = await fetch(`http://localhost:5000/api/packet-report?${queryParams.toString()}`);
+      const response = await fetch('http://localhost:5000/api/packet-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, source: 'SmartAssistant' })
+      });
       if (!response.ok) {
         throw new Error(`Failed to fetch data: ${response.statusText}`);
       }

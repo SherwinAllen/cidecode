@@ -150,39 +150,136 @@ def extract_detailed_transcripts(file_path):
     
     return detailed_transcripts
 
-# Load audio URLs from a JSON file.
+def process_duplicates_with_logic(audio_urls, transcripts_data):
+    """
+    Process audio URLs and transcripts with the duplicate handling logic:
+    1. Remove activities with "type":"system" when duplicate audio URLs are detected
+    2. Keep all activities with "type":"spoken" even with duplicate URLs
+    3. Maintain proper ordering for remaining activities
+    """
+    filtered_audio_urls = []
+    filtered_transcripts = []
+    
+    i = 0
+    while i < len(audio_urls):
+        current_url = audio_urls[i]
+        current_transcript = transcripts_data[i]
+        
+        # Check if this URL appears again in subsequent positions
+        duplicate_indices = []
+        j = i + 1
+        while j < len(audio_urls) and audio_urls[j] == current_url:
+            duplicate_indices.append(j)
+            j += 1
+        
+        if duplicate_indices:
+            # We have duplicates starting from index i
+            all_indices = [i] + duplicate_indices
+            all_transcripts = [transcripts_data[idx] for idx in all_indices]
+            
+            # Filter: keep only transcripts with type "spoken"
+            spoken_transcripts = [t for t in all_transcripts if t["type"] == "spoken"]
+            
+            if spoken_transcripts:
+                # We have at least one "spoken" transcript for this duplicate URL
+                # Add all spoken transcripts with their corresponding URL
+                for transcript in spoken_transcripts:
+                    filtered_audio_urls.append(current_url)
+                    # Create a copy without activity_number
+                    transcript_copy = transcript.copy()
+                    if "activity_number" in transcript_copy:
+                        del transcript_copy["activity_number"]
+                    filtered_transcripts.append(transcript_copy)
+                
+                print(f"🔊 Duplicate URL group (indices {all_indices}):")
+                print(f"   - Kept {len(spoken_transcripts)} 'spoken' activities")
+                print(f"   - Removed {len(all_transcripts) - len(spoken_transcripts)} 'system' activities")
+            
+            else:
+                # No spoken transcripts in this duplicate group, skip all
+                print(f"🔊 Duplicate URL group (indices {all_indices}):")
+                print(f"   - Removed all {len(all_transcripts)} activities (all were 'system' type)")
+            
+            # Move i to the position after all duplicates
+            i = j
+            
+        else:
+            # No duplicates for this URL, just add it
+            filtered_audio_urls.append(current_url)
+            # Create a copy without activity_number
+            transcript_copy = current_transcript.copy()
+            if "activity_number" in transcript_copy:
+                del transcript_copy["activity_number"]
+            filtered_transcripts.append(transcript_copy)
+            i += 1
+    
+    return filtered_audio_urls, filtered_transcripts
+
+def create_final_mapping(audio_urls, transcripts_data):
+    """
+    Create the final mapping between audio URLs and transcripts
+    """
+    final_mapping = {}
+    
+    for url, transcript in zip(audio_urls, transcripts_data):
+        # Use the URL as key and transcript data as value
+        final_mapping[url] = transcript
+    
+    return final_mapping
+
+# Load audio URLs from the JSON file
+print("📁 Loading audio URLs from audio_urls.json...")
 with open("backend/audio_urls.json", 'r') as f:
     audio_urls = json.load(f)
 
-# Extract detailed transcripts from the transcript file.
+print(f"📊 Loaded {len(audio_urls)} audio URLs")
+
+# Extract detailed transcripts from the transcript file
+print("📁 Loading and processing transcripts from alexa_activity_log.txt...")
 transcripts_data = extract_detailed_transcripts('alexa_activity_log.txt')
+print(f"📊 Loaded {len(transcripts_data)} transcripts")
 
-print("Extracted Detailed Transcript Data:")
-for entry in transcripts_data:
-    print(f"Activity {entry['activity_number']}:")
-    print(f"  Transcript: {entry['transcript']}")
-    print(f"  Type: {entry['type']}")
-    print(f"  Timestamp: {entry['timestamp']}")
-    print(f"  Speaker: {entry['speaker']}")
-    print(f"  Location: {entry['location']}")
-    print(f"  Device: {entry['device']}")
-    print()
+# Check if we have matching counts
+if len(audio_urls) != len(transcripts_data):
+    print(f"⚠️  WARNING: Mismatch in counts - Audio URLs: {len(audio_urls)}, Transcripts: {len(transcripts_data)}")
+    print("   This might affect the matching logic.")
 
-# Match audio URLs with transcript data in order.
-matched = {}
-for url, entry in zip(audio_urls, transcripts_data):
-    # Remove activity_number from the entry since it's redundant in the mapping
-    entry_copy = entry.copy()
-    del entry_copy["activity_number"]
-    matched[url] = entry_copy
+print("\n🔍 Applying duplicate processing logic...")
+print("   Logic:")
+print("   1. For duplicate audio URLs, remove 'system' type activities")
+print("   2. Keep all 'spoken' type activities even with duplicate URLs")
+print("   3. Maintain proper ordering for remaining activities")
 
-# Output the mapping as JSON.
-matched_json = json.dumps(matched, indent=2)
-print("\nMatched Audio URLs with Detailed Transcripts:")
+# Process with duplicate logic
+filtered_audio_urls, filtered_transcripts = process_duplicates_with_logic(audio_urls, transcripts_data)
+
+print(f"\n📊 AFTER PROCESSING:")
+print(f"   • Original audio URLs: {len(audio_urls)}")
+print(f"   • Original transcripts: {len(transcripts_data)}")
+print(f"   • Filtered audio URLs: {len(filtered_audio_urls)}")
+print(f"   • Filtered transcripts: {len(filtered_transcripts)}")
+
+# Create the final mapping
+print("\n🔗 Creating final mapping...")
+final_mapping = create_final_mapping(filtered_audio_urls, filtered_transcripts)
+
+# Count types in final output
+spoken_count = sum(1 for transcript in filtered_transcripts if transcript.get("type") == "spoken")
+system_count = sum(1 for transcript in filtered_transcripts if transcript.get("type") == "system")
+
+print(f"📊 FINAL OUTPUT BREAKDOWN:")
+print(f"   • Total entries: {len(final_mapping)}")
+print(f"   • 'spoken' type: {spoken_count}")
+print(f"   • 'system' type: {system_count}")
+
+# Output the mapping as JSON
+matched_json = json.dumps(final_mapping, indent=2)
+print("\n🎯 Final Matched Audio URLs with Detailed Transcripts:")
 print(matched_json)
 
-# Write the mapping to a JSON file.
+# Write the mapping to a JSON file
 with open("matched_audio_transcripts.json", "w") as f:
-    json.dump(matched, f, indent=2)
+    json.dump(final_mapping, f, indent=2)
 
-print(f"\n✅ Detailed mapping saved to: matched_audio_transcripts.json")
+print(f"\n✅ Final mapping saved to: matched_audio_transcripts.json")
+print(f"💾 File contains {len(final_mapping)} matched entries")

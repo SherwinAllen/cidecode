@@ -4,9 +4,9 @@ import re
 import time
 from playwright.sync_api import sync_playwright
 
-# Global sets and lists to track processed data
-PROCESSED_URLS = set()
+# Global lists to track processed data
 ALL_TRANSCRIPTS = []
+ALL_AUDIO_URLS = []  # Changed from ACTIVITY_AUDIO_URLS to store all URLs
 
 # Output files
 AUDIO_URLS_FILE = os.path.join("backend", "audio_urls.json")
@@ -44,14 +44,9 @@ def is_valid_audio_url(url):
     return True
 
 def save_audio_url(url):
-    """Save a valid audio URL to the JSON file immediately"""
-    if url in PROCESSED_URLS:
-        return False
-        
+    """Save ALL valid audio URLs to the JSON file immediately - NO UNIQUENESS CHECK"""
     if not is_valid_audio_url(url):
         return False
-    
-    PROCESSED_URLS.add(url)
     
     # Read existing URLs
     existing_urls = []
@@ -63,19 +58,16 @@ def save_audio_url(url):
     except (json.JSONDecodeError, FileNotFoundError):
         existing_urls = []
     
-    # Add new URL if not already present
-    if url not in existing_urls:
-        existing_urls.append(url)
-        
-        # Save updated list
-        with open(AUDIO_URLS_FILE, "w") as f:
-            json.dump(existing_urls, f, indent=2)
-        
-        print(f"   💾 IMMEDIATELY SAVED: {url}")
-        print(f"   📊 Total saved so far: {len(existing_urls)}")
-        return True
+    # ALWAYS add the URL without uniqueness check
+    existing_urls.append(url)
     
-    return False
+    # Save updated list
+    with open(AUDIO_URLS_FILE, "w") as f:
+        json.dump(existing_urls, f, indent=2)
+    
+    print(f"   💾 IMMEDIATELY SAVED: {url}")
+    print(f"   📊 Total URLs saved so far: {len(existing_urls)}")
+    return True
 
 def intercept_response(response):
     """Filters actual audio files based on content type and saves valid ones immediately."""
@@ -90,11 +82,11 @@ def intercept_response(response):
         if "audio" in content_type:  # Directly an audio file
             print(f"   🎵 AUDIO DETECTED: {url}")
             
-            # Try to save immediately
+            # Try to save immediately (NO UNIQUENESS CHECK)
             if save_audio_url(url):
                 print(f"   ✅ Successfully saved audio URL")
             else:
-                print(f"   ⚠️ Audio URL not saved (already processed or invalid)")
+                print(f"   ⚠️ Audio URL not saved (invalid)")
 
         elif "application/json" in content_type:  # Check JSON response
             # Skip redirect responses
@@ -219,17 +211,10 @@ def extract_single_transcript(activity, activity_num):
         return f"--- Activity {activity_num} [Error: {e}] ---\n"
 
 def process_single_activity_combined(activity, activity_num, total_activities):
-    """Process a single activity - extract transcript first, then trigger audio"""
     print(f"   📋 Processing activity {activity_num}/{total_activities}")
-    
-    # Record current state before processing (for audio tracking)
-    saved_before = len(PROCESSED_URLS)
-    
-    # Extract transcript first (before any interaction that might change DOM)
-    print("      📝 Extracting transcript...")
     transcript_data = extract_single_transcript(activity, activity_num)
     ALL_TRANSCRIPTS.append(transcript_data)
-    
+
     # Try to find and click expand button
     expand_buttons = [
         "button.apd-expand-toggle-button",
@@ -264,15 +249,13 @@ def process_single_activity_combined(activity, activity_num, total_activities):
             except Exception as e:
                 continue
     
-    # Check what audio URLs were saved during this activity
-    saved_after = len(PROCESSED_URLS)
-    new_saved = saved_after - saved_before
-    
-    # Show results for this activity
-    if new_saved > 0:
-        print(f"      ✅ Saved {new_saved} new audio URL(s)")
-    else:
-        print("      ⚠️ No new audio URLs saved")
+    # Get current count of URLs for this activity (for reporting only)
+    try:
+        with open(AUDIO_URLS_FILE, "r") as f:
+            current_total = len(json.load(f))
+        print(f"      📊 Total audio URLs saved so far: {current_total}")
+    except:
+        print(f"      📊 Total audio URLs saved so far: 0")
     
     return True
 
@@ -286,15 +269,11 @@ def initialize_output_files(clear_existing=False):
         with open(AUDIO_URLS_FILE, "w") as f:
             json.dump([], f, indent=2)
         print("   📁 Created new/cleared audio URLs file")
-        PROCESSED_URLS.clear()
     else:
         try:
             with open(AUDIO_URLS_FILE, "r") as f:
                 existing = json.load(f)
             print(f"   📁 Existing audio URLs file loaded with {len(existing)} URLs")
-            # Add existing URLs to processed set to avoid duplicates
-            for url in existing:
-                PROCESSED_URLS.add(url)
         except (json.JSONDecodeError, Exception) as e:
             # If file is corrupted, reset it
             with open(AUDIO_URLS_FILE, "w") as f:
@@ -303,6 +282,8 @@ def initialize_output_files(clear_existing=False):
     
     # Clear transcripts list
     ALL_TRANSCRIPTS.clear()
+    # Clear the audio URLs list (we're not using it for storage anymore)
+    ALL_AUDIO_URLS.clear()
 
 def scroll_to_load_more(page):
     """Scroll to bottom to load more activities"""
@@ -477,7 +458,6 @@ with sync_playwright() as p:
     print(f"\n📊 PROCESSING COMPLETE")
     print("-" * 40)
     print(f"   • Total activities processed: {total_processed}")
-    print(f"   • Total unique URLs processed: {len(PROCESSED_URLS)}")
     print(f"   • Transcripts extracted: {len(ALL_TRANSCRIPTS)}")
 
     # Final wait for any remaining audio URLs
@@ -499,18 +479,18 @@ with sync_playwright() as p:
     print("=" * 50)
     print(f"📊 FINAL STATISTICS:")
     print(f"   • Total activities processed: {total_processed}")
-    print(f"   • Unique audio URLs saved: {audio_extracted_count}")
+    print(f"   • ALL audio URLs saved: {audio_extracted_count} (including duplicates)")
     print(f"   • Transcripts extracted: {transcript_extracted_count}")
     
     # Calculate extraction rates
     if total_processed > 0:
         audio_rate = (audio_extracted_count / total_processed) * 100
         transcript_rate = (transcript_extracted_count / total_processed) * 100
-        print(f"   • Audio extraction rate: {audio_rate:.1f}%")
+        print(f"   • Audio URLs per activity: {audio_rate:.1f}%")
         print(f"   • Transcript extraction rate: {transcript_rate:.1f}%")
     
     print(f"\n💾 OUTPUT FILES:")
-    print(f"   • Audio URLs: {AUDIO_URLS_FILE}")
+    print(f"   • Audio URLs: {AUDIO_URLS_FILE} (contains ALL URLs, including duplicates)")
     print(f"   • Transcripts: {TRANSCRIPTS_FILE}")
     print("=" * 50)
 
