@@ -1,261 +1,338 @@
 import json
 import re
+import sys
+import os
 from datetime import datetime, timedelta
 
+# ----------------------
+# Utilities
+# ----------------------
 def get_formatted_date(date_string):
     """
-    Convert 'Today' or 'Yesterday' to actual dates, or return the original if already a date.
-    Returns format: 'DDth Month, YYYY'
+    Convert 'Today' or 'Yesterday' to actual dates, or parse explicit dates like
+    '10 October 2025' and return 'DD Month, YYYY'. If parsing fails, return the original.
     """
     today = datetime.now()
-    
-    if "Today" in date_string:
+
+    if isinstance(date_string, str) and re.search(r'\bToday\b', date_string, flags=re.IGNORECASE):
         return today.strftime("%d %B, %Y")
-    elif "Yesterday" in date_string:
-        yesterday = today - timedelta(days=1)
-        return yesterday.strftime("%d %B, %Y")
-    else:
-        # If it's already a proper date format, return as is
+    if isinstance(date_string, str) and re.search(r'\bYesterday\b', date_string, flags=re.IGNORECASE):
+        return (today - timedelta(days=1)).strftime("%d %B, %Y")
+
+    s = date_string.strip()
+    s = re.sub(r'(?i)^Activity on\s+', '', s).strip()
+
+    # Find a DD Month YYYY substring if present
+    m = re.search(r'(\d{1,2}\s+[A-Za-z]+\s+\d{4})', s)
+    if not m:
         return date_string
 
-def extract_detailed_transcripts(file_path):
+    date_part = m.group(1)
+    for fmt in ("%d %B %Y", "%d %b %Y", "%d %B, %Y", "%d %b, %Y"):
+        try:
+            dt = datetime.strptime(date_part, fmt)
+            return dt.strftime("%d %B, %Y")
+        except ValueError:
+            continue
+
+    return date_string
+
+
+def normalize_time(time_str):
     """
-    Reads the transcript file and extracts detailed information for each activity.
-    Returns a list of dicts with:
-    - transcript: the spoken text (in quotes) or system message
-    - type: "spoken" if in quotes, "system" if not
-    - timestamp: the formatted date and time
-    - speaker: the detected speaker name (if present) or "undefined"
-    - device: the device name (e.g., "Bangalore echoshow 8")
+    Normalize time strings like '10:01pm', '10:01 pm', '10:01 P.M.' to 'hh:mm am/pm'
+    """
+    if not time_str:
+        return time_str
+    t = time_str.lower().replace('.', '').strip()
+    t = re.sub(r'(\d{1,2}:\d{2})\s*([ap]m)$', r'\1 \2', t)
+    return t
+
+# ----------------------
+# Speaker / Device heuristics (no hardcoded speaker names)
+# ----------------------
+def split_speaker_and_device_from_info(info_line):
+    """
+    Given an info_line (which may contain speaker+device concatenated or just device),
+    return (speaker, device) with rules:
+      - If info_line contains a possessive ("'s"), treat entire info_line as device and speaker='undefined'
+      - Else if a device keyword is present, take device = substring starting at the earliest keyword occurrence;
+            speaker_candidate = substring before that (may be empty)
+            if speaker_candidate exists, try to extract a plausible speaker name:
+                - prefer first whitespace-separated token if it is a capitalized word
+                - otherwise match a leading CamelCase/name token like 'SherwinBangalore' -> 'Sherwin'
+      - Else if info_line has a space and the first token looks like a capitalized name, treat first token as speaker and rest as device
+      - Otherwise treat entire info_line as device and speaker='undefined'
+    No hardcoded speaker names are used.
+    """
+    if not info_line:
+        return "undefined", ""
+
+    info = info_line.strip()
+
+    # If possessive anywhere, treat as device (common pattern 'Name's device ...')
+    if re.search(r"[A-Za-z0-9_\-]+\s*'s\b", info) or "'s" in info:
+        # Entire string is device; do not try to pull speaker automatically
+        return "undefined", info
+
+    # device keywords to detect probable device boundary (lowercased checks)
+    device_keywords = ['echo', 'echoshow', 'fire tv', 'firetv', 'alexa', 'dot', 'tv', 'edition', 'fire', 'show']
+    lower = info.lower()
+
+    # find earliest occurrence of any keyword
+    earliest_idx = None
+    earliest_kw = None
+    for kw in device_keywords:
+        idx = lower.find(kw)
+        if idx != -1:
+            if earliest_idx is None or idx < earliest_idx:
+                earliest_idx = idx
+                earliest_kw = kw
+
+    if earliest_idx is not None:
+        # device is everything from earliest_idx to end
+        device = info[earliest_idx:].strip()
+        speaker_candidate = info[:earliest_idx].strip()
+
+        # attempt to extract speaker from speaker_candidate
+        if not speaker_candidate:
+            return "undefined", device
+
+        # If speaker_candidate contains whitespace, prefer the first token if it looks like a name
+        first_token = speaker_candidate.split()[0]
+        if re.match(r'^[A-Z][a-z]+$', first_token):
+            return first_token, device
+
+        # If concatenated (no spaces), try to extract a leading name via regex: leading capitalized sequence
+        m = re.match(r'^([A-Z][a-z]+)', speaker_candidate)
+        if m:
+            return m.group(1), device
+
+        # fallback: leave speaker undefined, keep device
+        return "undefined", device
+
+    # If no device keyword found:
+    # If there's a space and the first token looks like a capitalized name and the rest is not empty -> split
+    tokens = info.split()
+    if len(tokens) >= 2 and re.match(r'^[A-Z][a-z]+$', tokens[0]):
+        # consider first token as speaker, rest as device
+        speaker = tokens[0]
+        device = " ".join(tokens[1:]).strip()
+        return speaker, device
+
+    # fallback: entire info_line as device
+    return "undefined", info
+
+# ----------------------
+# NEW: Parse structured transcript format
+# ----------------------
+def parse_structured_transcripts(file_path):
+    """
+    Parse the new structured format where each activity has explicit fields:
+      --- Activity X ---
+      Speaker: ...
+      Device: ...
+      Timestamp: ...
+      Transcript: ...
+    
+    Returns list of dicts with activity_number, transcript, type, timestamp, speaker, device
     """
     detailed_transcripts = []
-    
+
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    # Split by activity blocks
+    activity_blocks = re.split(r'--- Activity (\d+) ---', content)
     
-    # Split by activity sections
-    activity_sections = re.split(r'--- Activity \d+ ---', content)
-    
-    for i, section in enumerate(activity_sections[1:], 1):  # Skip first empty section
-        lines = [line.strip() for line in section.strip().split('\n') if line.strip()]
+    # The first element is empty, then activity number, then block content, alternating
+    for i in range(1, len(activity_blocks), 2):
+        activity_num = int(activity_blocks[i])
+        block_content = activity_blocks[i + 1].strip()
         
-        if not lines:
-            continue
-            
-        activity_data = {
-            "activity_number": i,
-            "transcript": "",
-            "type": "system",  # Default to system
-            "timestamp": "",
-            "speaker": "undefined",  # Use "undefined" instead of null
-            "device": ""
+        # Parse the structured fields
+        speaker = "Unknown"
+        device = "Unknown" 
+        timestamp = "Unknown"
+        transcript = ""
+        
+        lines = [line.strip() for line in block_content.split('\n') if line.strip()]
+        
+        for line in lines:
+            if line.startswith('Speaker:'):
+                speaker = line.replace('Speaker:', '').strip()
+            elif line.startswith('Device:'):
+                device = line.replace('Device:', '').strip()
+            elif line.startswith('Timestamp:'):
+                timestamp = line.replace('Timestamp:', '').strip()
+            elif line.startswith('Transcript:'):
+                transcript = line.replace('Transcript:', '').strip()
+        
+        # Determine type based on transcript content
+        transcript_type = "system"
+        if transcript.startswith('"') and transcript.endswith('"'):
+            transcript_type = "spoken"
+            transcript = transcript[1:-1]  # Remove quotes for spoken content
+        elif "[System activity - no spoken content]" in transcript:
+            transcript_type = "system"
+        
+        entry = {
+            "activity_number": activity_num,
+            "transcript": transcript,
+            "type": transcript_type,
+            "timestamp": timestamp,
+            "speaker": speaker,
+            "device": device
         }
         
-        # First line is the transcript/activity summary
-        transcript_line = lines[0]
-        activity_data["transcript"] = transcript_line
-        
-        # Determine if it's spoken (in quotes) or system generated
-        if transcript_line.startswith('"') and transcript_line.endswith('"'):
-            activity_data["type"] = "spoken"
-            # Remove surrounding quotes for the transcript
-            activity_data["transcript"] = transcript_line[1:-1]
-        
-        # Process timestamp and subsequent lines
-        for j, line in enumerate(lines):
-            if line.startswith("Today") or line.startswith("Yesterday"):
-                # Extract the time portion and convert "Today"/"Yesterday" to actual date
-                time_match = re.search(r'(Today|Yesterday)\s+(\d{1,2}:\d{2}\s+[ap]m)', line)
-                if time_match:
-                    date_type, time_part = time_match.groups()
-                    formatted_date = get_formatted_date(date_type)
-                    activity_data["timestamp"] = f"{formatted_date} {time_part}"
-                else:
-                    activity_data["timestamp"] = get_formatted_date(line)
-                
-                # Check if there are more lines after timestamp
-                if j + 1 < len(lines):
-                    # This is the speaker/device line
-                    info_line = lines[j + 1]
-                    
-                    # Pattern 1: SpeakerName + Device (e.g., "SherwinBangalore echoshow 8")
-                    # Extract speaker name (capitalized word at beginning)
-                    speaker_match = re.match(r'^([A-Z][a-z]+)', info_line)
-                    if speaker_match:
-                        speaker_name = speaker_match.group(1)
-                        activity_data["speaker"] = speaker_name
-                        
-                        # The rest is the device name (may include location like "Bangalore")
-                        device_part = info_line[len(speaker_name):].strip()
-                        if device_part:
-                            activity_data["device"] = device_part
-                    
-                    # Pattern 2: Complex device names (e.g., "RajkumarRajkumar's 2nd Fire TV Edition TV")
-                    elif "'" in info_line or "Fire TV" in info_line:
-                        # Try to extract speaker from the beginning
-                        complex_speaker_match = re.match(r'^([A-Z][a-z]+)', info_line)
-                        if complex_speaker_match:
-                            speaker_name = complex_speaker_match.group(1)
-                            activity_data["speaker"] = speaker_name
-                        
-                        # The entire line is essentially the device description
-                        activity_data["device"] = info_line
-                    
-                    # Pattern 3: If no clear speaker pattern, check if it's just a device name
-                    elif any(device_keyword in info_line.lower() for device_keyword in ['echo', 'fire tv', 'alexa', 'dot']):
-                        activity_data["device"] = info_line
-                    
-                    # Pattern 4: Default - use the whole line as device
-                    else:
-                        activity_data["device"] = info_line
-                
-                break
-        
-        detailed_transcripts.append(activity_data)
+        detailed_transcripts.append(entry)
     
     return detailed_transcripts
 
+# ----------------------
+# Matching and duplicate logic
+# ----------------------
+def match_audio_with_transcripts(audio_urls, transcripts_data):
+    """
+    Match audio URLs with transcripts based on activity_number.
+    Returns two lists: matched_audio_urls and matched_transcripts
+    """
+    # tolerate activity_number being string/int in either input
+    audio_lookup = {int(a["activity_number"]): a["url"] for a in audio_urls}
+    transcript_lookup = {int(t["activity_number"]): t for t in transcripts_data}
+
+    common = set(audio_lookup.keys()) & set(transcript_lookup.keys())
+    sorted_common = sorted(common)
+
+    matched_audio_urls = []
+    matched_transcripts = []
+
+    print(f"🔍 Matching audio URLs with transcripts by activity number...")
+    print(f"   - Audio URLs activities: {sorted(audio_lookup.keys())}")
+    print(f"   - Transcript activities: {sorted(transcript_lookup.keys())}")
+    print(f"   - Common activities: {sorted_common}")
+
+    for act in sorted_common:
+        matched_audio_urls.append(audio_lookup[act])
+        t_copy = transcript_lookup[act].copy()
+        if "activity_number" in t_copy:
+            del t_copy["activity_number"]
+        matched_transcripts.append(t_copy)
+
+    return matched_audio_urls, matched_transcripts
+
+
 def process_duplicates_with_logic(audio_urls, transcripts_data):
     """
-    Process audio URLs and transcripts with the duplicate handling logic:
-    1. Remove activities with "type":"system" when duplicate audio URLs are detected
-    2. Keep all activities with "type":"spoken" even with duplicate URLs
-    3. Maintain proper ordering for remaining activities
+    For consecutive duplicate audio URLs:
+      - keep only transcripts of type "spoken"
+      - if none are spoken, drop the group
     """
     filtered_audio_urls = []
     filtered_transcripts = []
-    
+
     i = 0
     while i < len(audio_urls):
-        current_url = audio_urls[i]
-        current_transcript = transcripts_data[i]
-        
-        # Check if this URL appears again in subsequent positions
-        duplicate_indices = []
+        cur_url = audio_urls[i]
+        # find consecutive duplicates
+        dup_indices = []
         j = i + 1
-        while j < len(audio_urls) and audio_urls[j] == current_url:
-            duplicate_indices.append(j)
+        while j < len(audio_urls) and audio_urls[j] == cur_url:
+            dup_indices.append(j)
             j += 1
-        
-        if duplicate_indices:
-            # We have duplicates starting from index i
-            all_indices = [i] + duplicate_indices
-            all_transcripts = [transcripts_data[idx] for idx in all_indices]
-            
-            # Filter: keep only transcripts with type "spoken"
-            spoken_transcripts = [t for t in all_transcripts if t["type"] == "spoken"]
-            
-            if spoken_transcripts:
-                # We have at least one "spoken" transcript for this duplicate URL
-                # Add all spoken transcripts with their corresponding URL
-                for transcript in spoken_transcripts:
-                    filtered_audio_urls.append(current_url)
-                    # Create a copy without activity_number
-                    transcript_copy = transcript.copy()
-                    if "activity_number" in transcript_copy:
-                        del transcript_copy["activity_number"]
-                    filtered_transcripts.append(transcript_copy)
-                
-                print(f"🔊 Duplicate URL group (indices {all_indices}):")
-                print(f"   - Kept {len(spoken_transcripts)} 'spoken' activities")
-                print(f"   - Removed {len(all_transcripts) - len(spoken_transcripts)} 'system' activities")
-            
+
+        if dup_indices:
+            group_indices = [i] + dup_indices
+            group_transcripts = [transcripts_data[k] for k in group_indices]
+            spoken = [g for g in group_transcripts if g.get("type") == "spoken"]
+            if spoken:
+                # Keep all spoken entries for the same URL
+                for s in spoken:
+                    filtered_audio_urls.append(cur_url)
+                    filtered_transcripts.append(s)
+                print(f"🔊 Duplicate group {group_indices}: kept {len(spoken)} 'spoken', removed {len(group_transcripts)-len(spoken)} 'system'")
             else:
-                # No spoken transcripts in this duplicate group, skip all
-                print(f"🔊 Duplicate URL group (indices {all_indices}):")
-                print(f"   - Removed all {len(all_transcripts)} activities (all were 'system' type)")
-            
-            # Move i to the position after all duplicates
+                print(f"🔊 Duplicate group {group_indices}: removed all {len(group_transcripts)} 'system' entries")
             i = j
-            
         else:
-            # No duplicates for this URL, just add it
-            filtered_audio_urls.append(current_url)
-            # Create a copy without activity_number
-            transcript_copy = current_transcript.copy()
-            if "activity_number" in transcript_copy:
-                del transcript_copy["activity_number"]
-            filtered_transcripts.append(transcript_copy)
+            filtered_audio_urls.append(cur_url)
+            filtered_transcripts.append(transcripts_data[i])
             i += 1
-    
+
     return filtered_audio_urls, filtered_transcripts
+
 
 def create_final_mapping(audio_urls, transcripts_data):
     """
-    Create the final mapping between audio URLs and transcripts
+    Create final mapping {audio_url: transcript_dict}
     """
-    final_mapping = {}
+    mapping = {}
+    for u, t in zip(audio_urls, transcripts_data):
+        mapping[u] = t
+    return mapping
+
+# ----------------------
+# Main run with file path arguments
+# ----------------------
+def main(audio_urls_file, transcripts_file, output_file="matched_audio_transcripts.json"):
+    """
+    Main function that processes audio URLs and transcripts from specified files
+    """
+    print(f"📁 Loading audio URLs from {audio_urls_file}...")
+    try:
+        with open(audio_urls_file, "r", encoding="utf-8") as fa:
+            audio_urls_data = json.load(fa)
+        print(f"📊 Loaded {len(audio_urls_data)} audio URLs")
+    except FileNotFoundError:
+        print(f"❌ Error: Audio URLs file '{audio_urls_file}' not found")
+        return
+    except json.JSONDecodeError:
+        print(f"❌ Error: Invalid JSON format in '{audio_urls_file}'")
+        return
+
+    print(f"📁 Loading and processing transcripts from {transcripts_file}...")
+    try:
+        # Use the new parser for structured format
+        transcripts_data = parse_structured_transcripts(transcripts_file)
+        print(f"📊 Parsed {len(transcripts_data)} transcripts")
+    except FileNotFoundError:
+        print(f"❌ Error: Transcripts file '{transcripts_file}' not found")
+        return
+
+    # Show sample of parsed entries
+    print("\n🔍 Sample parsed entries (first 10):")
+    for e in transcripts_data[:10]:
+        print(f"  Activity {e['activity_number']}: transcript='{e['transcript'][:60]}' type={e['type']} timestamp='{e['timestamp']}' speaker='{e['speaker']}' device='{e['device']}'")
+
+    # Match them
+    matched_audio_urls, matched_transcripts = match_audio_with_transcripts(audio_urls_data, transcripts_data)
+    print(f"\n🔗 Matched {len(matched_audio_urls)} audio URLs with transcripts")
+
+    # Process duplicates
+    filtered_audio_urls, filtered_transcripts = process_duplicates_with_logic(matched_audio_urls, matched_transcripts)
+    print(f"\n📊 After duplicate processing: {len(filtered_audio_urls)} audio entries")
+
+    # Final mapping and save
+    final_mapping = create_final_mapping(filtered_audio_urls, filtered_transcripts)
+    with open(output_file, "w", encoding='utf-8') as fout:
+        json.dump(final_mapping, fout, indent=2, ensure_ascii=False)
+
+    print(f"\n✅ Final mapping saved to {output_file} (entries: {len(final_mapping)})")
     
-    for url, transcript in zip(audio_urls, transcripts_data):
-        # Use the URL as key and transcript data as value
-        final_mapping[url] = transcript
+    # Show final statistics
+    spoken_count = sum(1 for t in filtered_transcripts if t.get("type") == "spoken")
+    system_count = len(filtered_transcripts) - spoken_count
+    print(f"📈 Final breakdown: {spoken_count} spoken, {system_count} system entries")
+
+if __name__ == "__main__":
+    audio_file = "backend/audio_urls.json"
+    transcript_file = "alexa_activity_log.txt"
+    output_file = "matched_audio_transcripts.json"
     
-    return final_mapping
-
-# Load audio URLs from the JSON file
-print("📁 Loading audio URLs from audio_urls.json...")
-with open("backend/audio_urls.json", 'r') as f:
-    audio_urls = json.load(f)
-
-print(f"📊 Loaded {len(audio_urls)} audio URLs")
-
-# Extract detailed transcripts from the transcript file
-print("📁 Loading and processing transcripts from alexa_activity_log.txt...")
-transcripts_data = extract_detailed_transcripts('alexa_activity_log.txt')
-print(f"📊 Loaded {len(transcripts_data)} transcripts")
-
-# Display sample of extracted data for verification
-print("\n🔍 Sample of extracted transcript data:")
-for i in range(min(5, len(transcripts_data))):
-    entry = transcripts_data[i]
-    print(f"   Activity {entry['activity_number']}:")
-    print(f"     Transcript: {entry['transcript']}")
-    print(f"     Type: {entry['type']}")
-    print(f"     Timestamp: {entry['timestamp']}")
-    print(f"     Speaker: {entry['speaker']}")
-    print(f"     Device: {entry['device']}")
-
-# Check if we have matching counts
-if len(audio_urls) != len(transcripts_data):
-    print(f"⚠️  WARNING: Mismatch in counts - Audio URLs: {len(audio_urls)}, Transcripts: {len(transcripts_data)}")
-    print("   This might affect the matching logic.")
-
-print("\n🔍 Applying duplicate processing logic...")
-print("   Logic:")
-print("   1. For duplicate audio URLs, remove 'system' type activities")
-print("   2. Keep all 'spoken' type activities even with duplicate URLs")
-print("   3. Maintain proper ordering for remaining activities")
-
-# Process with duplicate logic
-filtered_audio_urls, filtered_transcripts = process_duplicates_with_logic(audio_urls, transcripts_data)
-
-print(f"\n📊 AFTER PROCESSING:")
-print(f"   • Original audio URLs: {len(audio_urls)}")
-print(f"   • Original transcripts: {len(transcripts_data)}")
-print(f"   • Filtered audio URLs: {len(filtered_audio_urls)}")
-print(f"   • Filtered transcripts: {len(filtered_transcripts)}")
-
-# Create the final mapping
-print("\n🔗 Creating final mapping...")
-final_mapping = create_final_mapping(filtered_audio_urls, filtered_transcripts)
-
-# Count types in final output
-spoken_count = sum(1 for transcript in filtered_transcripts if transcript.get("type") == "spoken")
-system_count = sum(1 for transcript in filtered_transcripts if transcript.get("type") == "system")
-
-print(f"📊 FINAL OUTPUT BREAKDOWN:")
-print(f"   • Total entries: {len(final_mapping)}")
-print(f"   • 'spoken' type: {spoken_count}")
-print(f"   • 'system' type: {system_count}")
-
-# Output the mapping as JSON
-matched_json = json.dumps(final_mapping, indent=2)
-print("\n🎯 Final Matched Audio URLs with Detailed Transcripts:")
-print(matched_json)
-
-# Write the mapping to a JSON file
-with open("matched_audio_transcripts.json", "w") as f:
-    json.dump(final_mapping, f, indent=2)
-
-print(f"\n✅ Final mapping saved to: matched_audio_transcripts.json")
-print(f"💾 File contains {len(final_mapping)} matched entries")
+    print("🔧 Processing files:")
+    print(f"   - Audio URLs: {audio_file}")
+    print(f"   - Transcripts: {transcript_file}")
+    print(f"   - Output: {output_file}")
+    print()
+    
+    main(audio_file, transcript_file, output_file)
