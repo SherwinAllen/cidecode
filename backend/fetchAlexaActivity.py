@@ -242,7 +242,7 @@ def extract_timestamp_from_activity(activity):
         return "Unknown"
 
 def extract_transcript_preserving_quotes(raw_text, speaker_name, device_name):
-    """Extract transcript while preserving quotes - OPTIMIZED"""
+    """Extract transcript while preserving exact text from Amazon page - OPTIMIZED"""
     if not raw_text.strip():
         return "[No transcript available]"
     
@@ -263,8 +263,8 @@ def extract_transcript_preserving_quotes(raw_text, speaker_name, device_name):
         if timestamp_pattern.search(line):
             continue
             
-        # Skip speaker/device duplicates
-        if (speaker_name != "Unknown" and speaker_name in line) or (device_name != "Unknown" and device_name in line):
+        # Skip speaker/device duplicates (only if they appear as standalone lines)
+        if (speaker_name != "Unknown" and line == speaker_name) or (device_name != "Unknown" and line == device_name):
             continue
             
         # Skip label lines
@@ -273,15 +273,17 @@ def extract_transcript_preserving_quotes(raw_text, speaker_name, device_name):
             
         transcript_lines.append(line)
     
-    # Join transcript lines
-    transcript = ' '.join(transcript_lines)
-    transcript = re.sub(r'\s+', ' ', transcript).strip()
+    # Join transcript lines - PRESERVE ORIGINAL FORMATTING
+    transcript = '\n'.join(transcript_lines)
     
-    # Quick check for system activities
-    if not transcript or 'activity on' in raw_text.lower() or 'audio could not be understood' in raw_text.lower():
-        return "[System activity - no spoken content]"
+    # Remove excessive whitespace but preserve line breaks for multi-line transcripts
+    transcript = re.sub(r'[ \t]+', ' ', transcript)  # Normalize spaces within lines
+    transcript = re.sub(r'\n +', '\n', transcript)   # Remove leading spaces after newlines
+    transcript = transcript.strip()
     
-    return transcript
+    # CRITICAL FIX: Don't filter out system activities - return whatever text remains
+    # This ensures we get the exact text from Amazon page, whether it's quoted or system text
+    return transcript if transcript else "[No transcript available]"
 
 def extract_single_transcript(activity, activity_num):
     """Extract transcript from a single activity - OPTIMIZED"""
@@ -440,7 +442,7 @@ def process_activity_batch(activities, start_index, end_index, total_activities)
                 print(f"      🚨 No play button {activity_num}")
             
             # Wait for audio load (KEEP ORIGINAL TIMING)
-            time.sleep(1)
+            time.sleep(0.5)
             
         except Exception as e:
             error_transcript = f"""--- Activity {i + 1} ---
@@ -476,7 +478,7 @@ def process_single_activity_deterministic(activity, activity_num, total_activiti
         print(f"      🚨 No play button {activity_num}")
         
     # Step 4: Wait for audio to load (KEEP ORIGINAL TIMING)
-    time.sleep(1)
+    time.sleep(0.5)
     
     return True
 
@@ -534,14 +536,14 @@ def fast_scroll_to_load_more(page, current_processed_count):
         
         # Single fast scroll instead of multiple
         page.evaluate("window.scrollBy(0, 800)")
-        time.sleep(1)
+        time.sleep(0.5)
         
         return True
         
     except Exception:
         # Fallback: quick scroll
         page.evaluate("window.scrollBy(0, 600)")
-        time.sleep(1)
+        time.sleep(0.5)
         return True
 
 def continuous_load_and_process_optimized(page):
@@ -585,7 +587,7 @@ def continuous_load_and_process_optimized(page):
             
             # Try scrolling to load more
             fast_scroll_to_load_more(page, total_processed)
-            time.sleep(1)  # Reduced from 2
+            time.sleep(0.5)  # Reduced from 2
             
             # Check again after scrolling
             new_activities = find_all_activities(page)
@@ -762,7 +764,7 @@ with sync_playwright() as p:
                 last_7_days = page.locator("#filter-menu > div.expanded-filter-menu > div.filter-by-date-menu.false > div.filter-options-list > div:nth-child(3) > span.apd-radio-button.fa-stack.fa-2x.undefined > i")
                 if last_7_days.count() > 0:
                     last_7_days.click()
-                    time.sleep(1.5)  # Reduced from 2
+                    time.sleep(1)  # Reduced from 2
                     print("✅ Date filter applied")
     except Exception as e:
         print(f"⚠️  Date filter not applied: {e}")
@@ -787,7 +789,7 @@ with sync_playwright() as p:
 
     # Final wait for any remaining audio URLs (reduced)
     print("⏳ Finalizing audio extraction...")
-    time.sleep(2)  # Reduced from 5
+    time.sleep(0.8)  # Reduced from 5
 
     # Save all final outputs
     save_final_outputs()
