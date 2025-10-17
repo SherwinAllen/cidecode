@@ -548,7 +548,7 @@ def fast_scroll_to_load_more(page, current_processed_count):
 
 def continuous_load_and_process_optimized(page):
     """Continuous loading and processing - HEAVILY OPTIMIZED"""
-    print("🔄 Starting OPTIMIZED loading and processing...")
+    print("🔄 Starting loading and processing...")
     
     total_processed = 0
     consecutive_no_new_count = 0
@@ -699,11 +699,7 @@ def post_process_audio_assignment():
     return len(missing_audio)
 
 # ========== OPTIMIZED MAIN EXECUTION ==========
-print("🚀 Starting OPTIMIZED Alexa Audio & Transcript Extraction")
-print("=" * 60)
-print("💡 OPTIMIZED: 40-50% faster processing!")
-print("💡 PRESERVED: 100% extraction rate maintained!")
-print("💡 ENHANCED: Better caching and batch processing!")
+print("🚀 Starting Alexa Audio & Transcript Extraction")
 print("=" * 60)
 
 with sync_playwright() as p:
