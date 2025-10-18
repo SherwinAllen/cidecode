@@ -65,7 +65,7 @@ app.get('/api/packet-report', (req, res) => {
 });
 
 // In-memory store for live SmartAssistant requests
-const requests = {}; // requestId -> { status, step, method, message, otp, filePath, done, error, userConfirmed2FA }
+const requests = {}; // requestId -> { status, step, progress, logs, method, message, otp, filePath, done, error, userConfirmed2FA, currentUrl }
 
 // POST entrypoint from frontend SmartAssistant to start headless pipeline
 app.post('/api/packet-report', (req, res) => {
@@ -83,17 +83,43 @@ app.post('/api/packet-report', (req, res) => {
   requests[requestId] = {
     status: 'started',
     step: 'init',
+    progress: 0,
+    logs: [
+      { timestamp: new Date().toISOString(), message: 'Starting data acquisition process...' }
+    ],
     method: null,
     message: null,
     otp: null,
     filePath: null,
     done: false,
     error: null,
-    userConfirmed2FA: false
+    userConfirmed2FA: false,
+    currentUrl: null
   };
 
   // respond immediately with requestId so frontend can show UI
   res.json({ requestId });
+
+  // Helper function to add logs and update progress
+  const addLog = (message, progress = null) => {
+    if (requests[requestId]) {
+      requests[requestId].logs.push({
+        timestamp: new Date().toISOString(),
+        message: message
+      });
+      if (progress !== null) {
+        requests[requestId].progress = progress;
+      }
+      console.log(`[${requestId}] ${message}`);
+    }
+  };
+
+  // Helper function to update current URL
+  const updateCurrentUrl = (url) => {
+    if (requests[requestId]) {
+      requests[requestId].currentUrl = url;
+    }
+  };
 
   // run background pipeline for this request
   (async () => {
@@ -106,41 +132,111 @@ app.post('/api/packet-report', (req, res) => {
     const env = { ...process.env, AMAZON_EMAIL: email, AMAZON_PASSWORD: password, REQUEST_ID: requestId };
 
     try {
+      // Step 1: Generating cookies
       requests[requestId].step = 'cookies';
       requests[requestId].status = 'running';
-      console.log(`[${requestId}] Step 1: Generating Amazon cookies (headless)...`);
+      addLog('Establishing secure connection...', 10);
 
       // spawn node script (so we can capture exit and not block main thread)
       const child = spawn('node', [cookiesScript], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 
-      child.stdout.on('data', (d) => console.log(`[${requestId}] cookies stdout: ${d.toString()}`));
-      child.stderr.on('data', (d) => console.error(`[${requestId}] cookies stderr: ${d.toString()}`));
+      let cookieOutput = '';
+      child.stdout.on('data', (d) => {
+        const data = d.toString();
+        cookieOutput += data;
+        
+        // Extract and update current URL from cookie script output
+        const urlMatch = data.match(/Current URL: (https?:\/\/[^\s]+)/);
+        if (urlMatch) {
+          updateCurrentUrl(urlMatch[1]);
+        }
+        
+        // Look for specific progress indicators from the cookie script
+        if (data.includes('Navigating to Alexa activity page') || data.includes('Checking authentication state')) {
+          addLog('Verifying account credentials...', 20);
+        }
+        if (data.includes('2FA detected')) {
+          addLog('Two-factor authentication required...', 25);
+        }
+        if (data.includes('Push notification page')) {
+          addLog('Push notification sent to your device. Please approve to continue...', 30);
+        }
+        if (data.includes('Secure connection established')) {
+          addLog('Secure connection established successfully', 35);
+        }
+        // Detect when we've successfully reached the target page
+        if (data.includes('Successfully reached Alexa activity page')) {
+          updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
+          addLog('Authentication completed successfully', 40);
+        }
+      });
+      
+      child.stderr.on('data', (d) => {
+        console.error(`[${requestId}] cookies stderr: ${d.toString()}`);
+      });
 
       const exitCode = await new Promise((resolve) => child.on('close', resolve));
       if (exitCode !== 0) {
         throw new Error(`GenerateAmazonCookie exited with ${exitCode}`);
       }
-      console.log(`[${requestId}] Cookies generated.`);
+      
+      // Ensure we mark authentication as complete
+      if (!requests[requestId].currentUrl?.includes('/alexa-privacy/apd/')) {
+        updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
+      }
+      addLog('Authentication completed successfully', 40);
 
       // Step 2: fetch Alexa activity
       requests[requestId].step = 'fetch';
       requests[requestId].status = 'running';
-      console.log(`[${requestId}] Step 2: Fetching Alexa activity...`);
-      await new Promise((resolve, reject) => {
-        exec(`python3 "${fetchScript}"`, { env }, (err, stdout, stderr) => {
-          if (err) {
-            console.error(`[${requestId}] fetch error:`, err);
-            return reject(err);
+      addLog('Starting data extraction from your account...', 45);
+
+      let activityCount = 0;
+      const fetchProcess = exec(`python3 "${fetchScript}"`, { env });
+      
+      fetchProcess.stdout.on('data', (data) => {
+        const output = data.toString();
+        console.log(`[${requestId}] fetchAlexaActivity stdout:`, output);
+        
+        // Parse activity count from Python script output
+        const activityMatch = output.match(/Processing (\d+) to (\d+)/);
+        if (activityMatch) {
+          const currentCount = parseInt(activityMatch[2]);
+          if (currentCount > activityCount) {
+            activityCount = currentCount;
+            const progress = Math.min(45 + Math.floor((currentCount / 50) * 40), 85); // 45-85% based on activities
+            addLog(`Extracted data from ${currentCount} activities so far...`, progress);
           }
-          console.log(`[${requestId}] fetchAlexaActivity stdout:`, stdout);
-          if (stderr) console.error(`[${requestId}] fetchAlexaActivity stderr:`, stderr);
-          resolve();
+        }
+        
+        // Check for completion
+        if (output.includes('PROCESSING COMPLETE') || output.includes('OPTIMIZED EXTRACTION COMPLETE')) {
+          const finalMatch = output.match(/Total activities processed: (\d+)/);
+          if (finalMatch) {
+            activityCount = parseInt(finalMatch[1]);
+            addLog(`Successfully extracted data from ${activityCount} activities`, 85);
+          }
+        }
+      });
+      
+      fetchProcess.stderr.on('data', (data) => {
+        console.error(`[${requestId}] fetchAlexaActivity stderr:`, data.toString());
+      });
+
+      await new Promise((resolve, reject) => {
+        fetchProcess.on('close', (code) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(`fetchAlexaActivity exited with code ${code}`));
+          }
         });
       });
 
       // Step 3: Sync transcripts
       requests[requestId].step = 'sync';
-      console.log(`[${requestId}] Step 3: Syncing audio transcripts...`);
+      addLog('Organizing extracted data...', 90);
+      
       await new Promise((resolve, reject) => {
         exec(`python3 "${syncScript}"`, { env }, (err, stdout, stderr) => {
           if (err) {
@@ -149,18 +245,27 @@ app.post('/api/packet-report', (req, res) => {
           }
           console.log(`[${requestId}] SyncAudioTranscripts stdout:`, stdout);
           if (stderr) console.error(`[${requestId}] SyncAudioTranscripts stderr:`, stderr);
+          
+          // Parse final stats from sync script
+          if (stdout.includes('Final mapping saved')) {
+            const mappingMatch = stdout.match(/entries: (\d+)\)/);
+            if (mappingMatch) {
+              addLog(`Data organization complete (${mappingMatch[1]} entries processed)`, 95);
+            }
+          }
           resolve();
         });
       });
 
       // Step 4: hash and prepare JSON path for download
       requests[requestId].step = 'hash';
-      console.log(`[${requestId}] Step 4: Hashing JSON...`);
+      addLog('Finalizing data package...', 98);
+      
       await new Promise((resolve, reject) => {
         exec(`python3 "${hashScript}" "${jsonPath}"`, { env }, (err, stdout, stderr) => {
           if (err) {
             console.warn(`[${requestId}] hash error:`, err);
-            return reject(err);
+            // Don't reject here as hash failure shouldn't stop the download
           }
           console.log(`[${requestId}] hash output:`, stdout);
           resolve();
@@ -171,20 +276,37 @@ app.post('/api/packet-report', (req, res) => {
       requests[requestId].filePath = jsonPath;
       requests[requestId].done = true;
       requests[requestId].status = 'completed';
+      addLog('Data extraction complete! Your file is ready for download.', 100);
+      
       console.log(`[${requestId}] Pipeline completed successfully.`);
     } catch (err) {
       console.error(`[${requestId}] Pipeline error:`, err.message || err);
       requests[requestId].status = 'error';
       requests[requestId].error = (err && err.message) || String(err);
+      
+      // Add specific error messages for common issues
+      if (err.message.includes('push notification') || err.message.includes('Push')) {
+        addLog('Push notification was not approved in time. Please try again and make sure to approve the notification on your device.', null);
+      } else if (err.message.includes('2FA') || err.message.includes('authentication')) {
+        addLog('Authentication failed. Please check your credentials and try again.', null);
+      } else if (err.message.includes('credentials') || err.message.includes('password')) {
+        addLog('Invalid email or password. Please check your credentials and try again.', null);
+      } else {
+        addLog(`Error during data acquisition: ${err.message}`, null);
+      }
     }
   })();
 });
 
-// Frontend polling endpoint for 2FA / progress
+// Frontend polling endpoint for 2FA / progress - UPDATED: No status changes for push notification
 app.get('/api/2fa-status/:id', (req, res) => {
   const id = req.params.id;
   const info = requests[id];
   if (!info) return res.status(404).send('Not found');
+  
+  // REMOVED: No automatic status changes for push notification
+  // The frontend will handle modal closure based on URL changes only
+  
   res.json(info);
 });
 
@@ -213,13 +335,16 @@ app.post('/api/confirm-2fa/:id', (req, res) => {
 // Internal endpoint used by the headless node script to set detected method / message
 app.post('/api/internal/2fa-update/:id', (req, res) => {
   const id = req.params.id;
-  const { method, message } = req.body;
+  const { method, message, currentUrl } = req.body;
   const info = requests[id];
   if (!info) return res.status(404).send('Not found');
   info.method = method;
   info.message = message || null;
   info.status = 'waiting_for_2fa';
-  console.log(`[${id}] 2FA update from headless script:`, method, message);
+  if (currentUrl) {
+    info.currentUrl = currentUrl;
+  }
+  console.log(`[${id}] 2FA update from headless script:`, method, message, currentUrl);
   res.json({ ok: true });
 });
 
