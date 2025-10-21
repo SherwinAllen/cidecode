@@ -21,11 +21,12 @@ app.get('/api/packet-report', (req, res) => {
 
     // Define the paths to the Python scripts.
     const script1 = path.join(__dirname, 'samsung_adb.py');
-    const script2 = path.join(__dirname, 'report_gen.py');
-    const script3 = path.join(__dirname, 'generateTimeline.py');
+    const script2 = path.join(__dirname,'report_gen.py');
+    const script3 = path.join(__dirname,'generateTimeline.py');
 
+    console.log("Script path is:",script1)
     // Execute all three Python scripts sequentially.
-    exec(`python3 "${script1}" && python3 "${script2}" && python3 "${script3}"`, (err, stdout, stderr) => {
+    exec(`python "${script1}" && python "${script2}" && python "${script3}"`, (err, stdout, stderr) => {
       if (err) {
         console.error('Error executing Python scripts:', err);
         res.status(500).send('Error generating DOCX file');
@@ -37,7 +38,7 @@ app.get('/api/packet-report', (req, res) => {
       // Once the Python scripts complete, hash the DOCX file.
       const docxPath = path.join(__dirname, '..', 'Forensic_Log_Report.docx');
       const hashScript = path.join(__dirname, 'hash.py');
-      exec(`python3 "${hashScript}" "${docxPath}"`, (hashErr, hashStdout, hashStderr) => {
+      exec(`python "${hashScript}" "${docxPath}"`, (hashErr, hashStdout, hashStderr) => {
         if (hashErr) {
           console.error('Error computing hash for DOCX file:', hashErr);
         } else {
@@ -127,7 +128,7 @@ app.post('/api/packet-report', (req, res) => {
       requests[requestId].status = 'running';
       console.log(`[${requestId}] Step 2: Fetching Alexa activity...`);
       await new Promise((resolve, reject) => {
-        exec(`python3 "${fetchScript}"`, { env }, (err, stdout, stderr) => {
+        exec(`python "${fetchScript}"`, { env }, (err, stdout, stderr) => {
           if (err) {
             console.error(`[${requestId}] fetch error:`, err);
             return reject(err);
@@ -142,12 +143,12 @@ app.post('/api/packet-report', (req, res) => {
       requests[requestId].step = 'sync';
       console.log(`[${requestId}] Step 3: Syncing audio transcripts...`);
       await new Promise((resolve, reject) => {
-        exec(`python3 "${syncScript}"`, { env }, (err, stdout, stderr) => {
+        exec(`python "${syncScript}"`, { env }, (err, stdout, stderr) => {
           if (err) {
             console.error(`[${requestId}] sync error:`, err);
             return reject(err);
           }
-          console.log(`[${requestId}] SyncAudioTranscripts stdout:`, stdout);
+          console.log(`[${requestId}] SyncAudioTranscripts stdout:`, stdout);d
           if (stderr) console.error(`[${requestId}] SyncAudioTranscripts stderr:`, stderr);
           resolve();
         });
@@ -157,7 +158,7 @@ app.post('/api/packet-report', (req, res) => {
       requests[requestId].step = 'hash';
       console.log(`[${requestId}] Step 4: Hashing JSON...`);
       await new Promise((resolve, reject) => {
-        exec(`python3 "${hashScript}" "${jsonPath}"`, { env }, (err, stdout, stderr) => {
+        exec(`python "${hashScript}" "${jsonPath}"`, { env }, (err, stdout, stderr) => {
           if (err) {
             console.warn(`[${requestId}] hash error:`, err);
             return reject(err);
