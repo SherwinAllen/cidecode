@@ -8,7 +8,7 @@ import {
   fancyHeadingStyle,
   spinnerStyle
 } from '../constants/styles';
-import { FaEye, FaEyeSlash, FaDownload, FaExclamationTriangle } from 'react-icons/fa';
+import { FaEye, FaEyeSlash, FaDownload, FaExclamationTriangle, FaTimesCircle, FaPuzzlePiece, FaStop } from 'react-icons/fa';
 
 const SmartAssistant = () => {
   const [teamText, setTeamText] = useState('');
@@ -26,7 +26,16 @@ const SmartAssistant = () => {
   const [showProgress, setShowProgress] = useState(false);
   const [showWarningModal, setShowWarningModal] = useState(false);
   const [hasDownloaded, setHasDownloaded] = useState(false);
-  const [uniqueLogs, setUniqueLogs] = useState([]); // NEW: Store unique logs
+  const [uniqueLogs, setUniqueLogs] = useState([]);
+  const [showAuthErrorModal, setShowAuthErrorModal] = useState(false);
+  const [authErrorMessage, setAuthErrorMessage] = useState('');
+  const [showPushDeniedModal, setShowPushDeniedModal] = useState(false);
+  const [showUnknown2FAModal, setShowUnknown2FAModal] = useState(false);
+  const [showGenericErrorModal, setShowGenericErrorModal] = useState(false);
+  const [genericErrorMessage, setGenericErrorMessage] = useState('');
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [otpError, setOtpError] = useState(null);
   const navigate = useNavigate();
 
   // Use refs for values that need to be fresh in polling
@@ -34,7 +43,7 @@ const SmartAssistant = () => {
   const pushNotificationHandledRef = useRef(false);
   const pollingActiveRef = useRef(false);
   const show2FAModalRef = useRef(false);
-  const seenLogMessages = useRef(new Set()); // NEW: Track seen log messages
+  const seenLogMessages = useRef(new Set());
 
   // OTP (6 boxes)
   const [otpDigits, setOtpDigits] = useState(Array(6).fill(''));
@@ -57,7 +66,76 @@ const SmartAssistant = () => {
     return () => clearTimeout(timer);
   }, []);
 
-  // NEW: Filter duplicate logs when twoFAInfo changes
+  // Handle authentication errors from backend
+  useEffect(() => {
+    if (twoFAInfo?.errorType) {
+      let errorMessage = '';
+      
+      if (twoFAInfo.errorType === 'INVALID_EMAIL') {
+        errorMessage = 'The email address you entered is not associated with an Amazon account. Please check your email and try again.';
+        setAuthErrorMessage(errorMessage);
+        setShowAuthErrorModal(true);
+        setDownloading(false);
+        setShowProgress(false);
+        pollingActiveRef.current = false;
+      } else if (twoFAInfo.errorType === 'INCORRECT_PASSWORD') {
+        errorMessage = 'The password you entered is incorrect. Please check your password and try again.';
+        setAuthErrorMessage(errorMessage);
+        setShowAuthErrorModal(true);
+        setDownloading(false);
+        setShowProgress(false);
+        pollingActiveRef.current = false;
+      } else if (twoFAInfo.errorType === 'PUSH_DENIED') {
+        setShowPushDeniedModal(true);
+        setDownloading(false);
+        setShowProgress(false);
+        pollingActiveRef.current = false;
+      } else if (twoFAInfo.errorType === 'UNKNOWN_2FA_PAGE') {
+        setShowUnknown2FAModal(true);
+        setDownloading(false);
+        setShowProgress(false);
+        pollingActiveRef.current = false;
+      } else if (twoFAInfo.errorType === 'INVALID_OTP') {
+        setOtpError(twoFAInfo.otpError || 'The code you entered is not valid. Please check the code and try again.');
+        setShow2FAModal(true);
+        setOtpSubmitted(false);
+        otpSubmittedRef.current = false;
+        setOtpDigits(Array(6).fill(''));
+        inputsRef.current.forEach((el) => { if (el) el.value = ''; });
+      } else if (twoFAInfo.errorType === 'GENERIC_ERROR') {
+        // Handle generic errors with user-friendly modal
+        setGenericErrorMessage(twoFAInfo.error || 'An unexpected error occurred. Please try again.');
+        setShowGenericErrorModal(true);
+        setDownloading(false);
+        setShowProgress(false);
+        pollingActiveRef.current = false;
+      } else if (twoFAInfo.errorType === 'CANCELLED') {
+        // Handle cancellation
+        console.log('Pipeline was cancelled on server');
+        setDownloading(false);
+        setShowProgress(false);
+        pollingActiveRef.current = false;
+        
+        // Wait a moment then reset to initial state
+        setTimeout(() => {
+          completeReset();
+        }, 2000);
+      }
+    }
+  }, [twoFAInfo?.errorType, twoFAInfo?.otpError, twoFAInfo?.error]);
+
+  // Handle OTP modal display from backend - FIXED LOGIC
+  useEffect(() => {
+    if (twoFAInfo?.showOtpModal && !show2FAModalRef.current) {
+      console.log('🔄 Opening OTP modal from backend signal');
+      setShow2FAModal(true);
+      if (twoFAInfo.otpError) {
+        setOtpError(twoFAInfo.otpError);
+      }
+    }
+  }, [twoFAInfo?.showOtpModal, twoFAInfo?.otpError]);
+
+  // Filter duplicate logs when twoFAInfo changes
   useEffect(() => {
     if (twoFAInfo?.logs) {
       const newUniqueLogs = [];
@@ -70,10 +148,8 @@ const SmartAssistant = () => {
         }
       });
       
-      // Update the ref with all seen messages (including previous ones)
       seenLogMessages.current = new Set([...seenLogMessages.current, ...newSeenMessages]);
       
-      // Only update state if we have new unique logs
       if (newUniqueLogs.length > 0) {
         setUniqueLogs(prev => [...prev, ...newUniqueLogs]);
       }
@@ -85,6 +161,7 @@ const SmartAssistant = () => {
     if (showProgress && downloading) {
       setUniqueLogs([]);
       seenLogMessages.current = new Set();
+      setOtpError(null);
     }
   }, [showProgress, downloading]);
 
@@ -99,21 +176,112 @@ const SmartAssistant = () => {
 
   // Auto-focus first OTP input when modal opens
   useEffect(() => {
-    if (show2FAModal && twoFAInfo?.method?.includes('OTP')) {
+    if (show2FAModal && (twoFAInfo?.method?.includes('OTP') || twoFAInfo?.errorType === 'INVALID_OTP')) {
       setTimeout(() => {
         if (inputsRef.current[0]) {
           inputsRef.current[0].focus();
         }
       }, 100);
     }
-  }, [show2FAModal, twoFAInfo?.method]);
+  }, [show2FAModal, twoFAInfo?.method, twoFAInfo?.errorType]);
+
+  // NEW: Complete reset function
+  const completeReset = () => {
+    setDownloading(false);
+    setShowProgress(false);
+    setTwoFAInfo(null);
+    setRequestId(null);
+    setShow2FAModal(false);
+    setOtpSubmitted(false);
+    setPushNotificationHandled(false);
+    setOtpError(null);
+    setOtpDigits(Array(6).fill(''));
+    setShowCancelModal(false);
+    setCancelling(false);
+    pollingActiveRef.current = false;
+    otpSubmittedRef.current = false;
+    pushNotificationHandledRef.current = false;
+    show2FAModalRef.current = false;
+    setUniqueLogs([]);
+    seenLogMessages.current = new Set();
+  };
+
+  // Handle cancellation request
+  const handleCancelAcquisition = () => {
+    setShowCancelModal(true);
+  };
+
+  // Handle confirmed cancellation
+  const handleConfirmCancellation = async () => {
+    setCancelling(true);
+    setShowCancelModal(false);
+    
+    if (!requestId) {
+      console.error('No request ID found for cancellation');
+      setCancelling(false);
+      return;
+    }
+
+    try {
+      // Call cancellation endpoint
+      const response = await fetch(`http://localhost:5000/api/cancel-acquisition/${requestId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to cancel acquisition');
+      }
+
+      console.log('Data acquisition cancelled successfully');
+      
+      // Add cancellation log to UI
+      if (twoFAInfo) {
+        setTwoFAInfo(prev => ({
+          ...prev,
+          logs: [
+            ...(prev.logs || []),
+            {
+              timestamp: new Date().toISOString(),
+              message: 'Data acquisition cancelled by user. Cleaning up...'
+            }
+          ],
+          status: 'cancelled',
+          error: 'Data acquisition was cancelled by user.'
+        }));
+      }
+
+      // Wait a moment for cleanup to complete, then reset
+      setTimeout(() => {
+        completeReset();
+        setCancelling(false);
+      }, 1000);
+
+    } catch (error) {
+      console.error('Error cancelling acquisition:', error);
+      setError('Failed to cancel data acquisition. Please try again.');
+      setCancelling(false);
+    }
+  };
+
+  // Handle cancellation modal close (when user clicks No)
+  const handleCancelModalClose = () => {
+    setShowCancelModal(false);
+  };
 
   const handleAcquireData = async () => {
     setError(null);
     setShowProgress(true);
     setHasDownloaded(false);
-    setUniqueLogs([]); // Reset logs
-    seenLogMessages.current = new Set(); // Reset seen messages
+    setUniqueLogs([]);
+    setShowAuthErrorModal(false);
+    setShowPushDeniedModal(false);
+    setShowUnknown2FAModal(false);
+    setShowGenericErrorModal(false);
+    setAuthErrorMessage('');
+    setGenericErrorMessage('');
+    setOtpError(null);
+    seenLogMessages.current = new Set();
 
     if (!email.trim() || !password.trim()) {
       setError("Please fill in both Email and Password fields.");
@@ -147,10 +315,11 @@ const SmartAssistant = () => {
       poll2FAStatus(json.requestId);
     } catch (err) {
       console.error("Error acquiring data:", err);
-      setError(err.message);
+      // Show generic error modal for any unexpected errors
+      setGenericErrorMessage('Failed to start data acquisition. Please check your connection and try again.');
+      setShowGenericErrorModal(true);
       setDownloading(false);
       setShowProgress(false);
-      pollingActiveRef.current = false;
     }
   };
 
@@ -160,7 +329,7 @@ const SmartAssistant = () => {
     handleAcquireData();
   };
 
-  // polling function - UPDATED: No automatic download
+  // polling function
   async function poll2FAStatus(id) {
     try {
       while (pollingActiveRef.current) {
@@ -170,6 +339,21 @@ const SmartAssistant = () => {
 
         // keep UI informed
         setTwoFAInfo(info);
+
+        // Check if pipeline was cancelled
+        if (info.status === 'cancelled') {
+          console.log('Pipeline was cancelled on server');
+          setTwoFAInfo(info);
+          setDownloading(false);
+          setShowProgress(false);
+          pollingActiveRef.current = false;
+          
+          // Wait a moment then reset to initial state
+          setTimeout(() => {
+            completeReset();
+          }, 2000);
+          break;
+        }
 
         // Improved push notification detection and handling
         const isPushNotificationCompleted = info.method && 
@@ -194,12 +378,16 @@ const SmartAssistant = () => {
         // 3. OTP hasn't been submitted (using ref for fresh value)
         // 4. Push notification hasn't been handled (NEW condition)
         // 5. We're not in a completed state
+        // 6. No authentication error
+        // 7. Not an OTP error (handled separately)
         if (info.method && 
             !show2FAModalRef.current && 
             !otpSubmittedRef.current && 
             !pushNotificationHandledRef.current &&
             !info.done && 
-            info.status !== 'error') {
+            info.status !== 'error' &&
+            !info.errorType &&
+            !info.showOtpModal) {
           setShow2FAModal(true);
         }
 
@@ -215,8 +403,10 @@ const SmartAssistant = () => {
           break;
         }
 
-        if (info.status === 'error') {
-          setError(info.error || 'Error in backend pipeline');
+        if (info.status === 'error' && !info.errorType) {
+          // This is a generic error without specific type
+          setGenericErrorMessage(info.error || 'An unexpected error occurred. Please try again.');
+          setShowGenericErrorModal(true);
           setShow2FAModal(false);
           setOtpSubmitted(false);
           setPushNotificationHandled(false);
@@ -234,14 +424,7 @@ const SmartAssistant = () => {
     } catch (err) {
       console.error('Polling error', err);
       setError(err.message);
-      setShow2FAModal(false);
-      setOtpSubmitted(false);
-      setPushNotificationHandled(false);
-      otpSubmittedRef.current = false;
-      pushNotificationHandledRef.current = false;
-      setDownloading(false);
-      setShowProgress(false);
-      pollingActiveRef.current = false;
+      completeReset();
     }
   }
 
@@ -275,21 +458,42 @@ const SmartAssistant = () => {
   // Handle back to acquisition with warning
   const handleBackToAcquisition = () => {
     if (twoFAInfo?.done && !hasDownloaded) {
-      // Show warning modal if data is ready but not downloaded
       setShowWarningModal(true);
     } else {
-      // Otherwise, just go back
-      setShowProgress(false);
+      completeReset();
     }
   };
 
   // Handle confirmed back to acquisition (after warning)
   const handleConfirmBackToAcquisition = () => {
     setShowWarningModal(false);
-    setShowProgress(false);
-    // Optionally reset states if needed
-    setTwoFAInfo(null);
-    setRequestId(null);
+    completeReset();
+  };
+
+  // Handle authentication error modal close
+  const handleAuthErrorModalClose = () => {
+    setShowAuthErrorModal(false);
+    setAuthErrorMessage('');
+    completeReset();
+  };
+
+  // Handle push denied modal close - FIXED
+  const handlePushDeniedModalClose = () => {
+    setShowPushDeniedModal(false);
+    completeReset(); // Use complete reset instead of partial reset
+  };
+
+  // Handle unknown 2FA modal close
+  const handleUnknown2FAModalClose = () => {
+    setShowUnknown2FAModal(false);
+    completeReset();
+  };
+
+  // Handle generic error modal close
+  const handleGenericErrorModalClose = () => {
+    setShowGenericErrorModal(false);
+    setGenericErrorMessage('');
+    completeReset();
   };
 
   // assemble OTP
@@ -298,6 +502,7 @@ const SmartAssistant = () => {
   // OTP submit handler
   const submitOtp = async () => {
     setError(null);
+    setOtpError(null);
     const otp = assembledOtp();
     if (otp.length !== 6 || !/^\d{6}$/.test(otp)) {
       setError('Enter the full 6-digit OTP.');
@@ -308,16 +513,9 @@ const SmartAssistant = () => {
       return;
     }
 
-    // Set both state and ref to prevent modal reopening
     setOtpSubmitted(true);
     otpSubmittedRef.current = true;
-
-    // Close the modal immediately and permanently for this session
-    setShow2FAModal(false);
-
-    // Clear OTP UI
-    setOtpDigits(Array(6).fill(''));
-    inputsRef.current.forEach((el) => { if (el) el.value = ''; });
+    setShow2FAModal(false); // NEW: Immediately close modal on submit
 
     try {
       const res = await fetch(`http://localhost:5000/api/submit-otp/${requestId}`, {
@@ -328,11 +526,9 @@ const SmartAssistant = () => {
       if (!res.ok) {
         const txt = await res.text().catch(() => 'Failed to send OTP');
         setError(txt || 'Failed to send OTP');
-        // Only allow reopening if there was an error
         setOtpSubmitted(false);
         otpSubmittedRef.current = false;
       }
-      // If successful, otpSubmitted remains true and modal stays closed
     } catch (err) {
       console.error('Failed to send OTP', err);
       setError('Failed to send OTP to server');
@@ -344,7 +540,7 @@ const SmartAssistant = () => {
   // Handle manual modal close for push notification
   const handleManualModalClose = () => {
     setShow2FAModal(false);
-    // If it's a push notification modal, mark it as handled to prevent reopening
+    setOtpError(null);
     if (twoFAInfo?.method?.includes('Push')) {
       setPushNotificationHandled(true);
       pushNotificationHandledRef.current = true;
@@ -373,15 +569,12 @@ const SmartAssistant = () => {
     copy[idx] = digit;
     setOtpDigits(copy);
     
-    // Auto-submit when all 6 digits are filled
     if (idx < 5) {
       const next = inputsRef.current[idx + 1];
       if (next) next.focus();
     } else {
-      // If this is the last digit (index 5) and we just filled it, check if all digits are filled
       const allFilled = copy.every(digit => digit !== '');
       if (allFilled) {
-        // Small timeout to ensure the last digit is set before submitting
         setTimeout(() => {
           submitOtp();
         }, 100);
@@ -409,12 +602,9 @@ const SmartAssistant = () => {
     } else if (e.key === 'ArrowRight' && idx < 5) {
       inputsRef.current[idx + 1]?.focus();
     } else if (e.key === 'Enter') {
-      // Handle Enter key in OTP fields
       if (idx === 5) {
-        // If Enter is pressed in the last OTP field, submit
         submitOtp();
       } else if (otpDigits[idx]) {
-        // If Enter is pressed in any field with content, move to next
         const next = inputsRef.current[idx + 1];
         if (next) next.focus();
       }
@@ -437,7 +627,6 @@ const SmartAssistant = () => {
     const nextFocusIdx = Math.min(5, startIdx + digits.length);
     setTimeout(() => inputsRef.current[nextFocusIdx]?.focus(), 0);
     
-    // Auto-submit if all 6 digits are pasted
     if (digits.length === 6) {
       setTimeout(() => {
         submitOtp();
@@ -469,7 +658,6 @@ const SmartAssistant = () => {
   };
   const bigButtonHover = { scale: 1.1, boxShadow: '0 0 30px rgba(0,255,0,1)' };
   
-  // NEW: Smaller button styles for progress view
   const smallButtonStyle = {
     padding: '12px 24px',
     backgroundColor: '#0f0',
@@ -486,6 +674,22 @@ const SmartAssistant = () => {
     minWidth: '180px'
   };
   const smallButtonHover = { scale: 1.05, boxShadow: '0 0 15px rgba(0,255,0,0.9)' };
+
+  const cancelButtonStyle = {
+    padding: '12px 24px',
+    backgroundColor: 'transparent',
+    border: '2px solid #ff4444',
+    color: '#ff4444',
+    cursor: 'pointer',
+    fontSize: '1rem',
+    borderRadius: '6px',
+    margin: '0 10px',
+    fontFamily: "'Orbitron', sans-serif",
+    textTransform: 'uppercase',
+    boxShadow: '0 0 10px rgba(255,68,68,0.7)',
+    transition: 'transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out',
+    minWidth: '180px'
+  };
 
   const inputWrapperStyle = { width: '80%', margin: '20px auto 0 auto', display: 'block', height: '56px' };
   const passwordWrapperStyle = { width: '80%', margin: '20px auto 0 auto', position: 'relative', display: 'block', height: '56px' };
@@ -545,7 +749,6 @@ const SmartAssistant = () => {
     margin: '0 4px'
   };
 
-  // NEW: Warning modal button styles
   const warningButtonStyle = {
     padding: '10px 20px',
     borderRadius: '6px',
@@ -557,9 +760,56 @@ const SmartAssistant = () => {
     transition: 'all 0.2s ease-in-out'
   };
 
-  // Progress bar and log styles - UPDATED with larger log container
+  const authErrorButtonStyle = {
+    padding: '12px 24px',
+    borderRadius: '6px',
+    border: 'none',
+    cursor: 'pointer',
+    fontFamily: "'Orbitron', sans-serif",
+    fontSize: '1rem',
+    margin: '0 10px',
+    transition: 'all 0.2s ease-in-out',
+    minWidth: '120px'
+  };
+
+  const pushDeniedButtonStyle = {
+    padding: '12px 24px',
+    borderRadius: '6px',
+    border: 'none',
+    cursor: 'pointer',
+    fontFamily: "'Orbitron', sans-serif",
+    fontSize: '1rem',
+    margin: '0 10px',
+    transition: 'all 0.2s ease-in-out',
+    minWidth: '120px'
+  };
+
+  const unknown2FAButtonStyle = {
+    padding: '12px 24px',
+    borderRadius: '6px',
+    border: 'none',
+    cursor: 'pointer',
+    fontFamily: "'Orbitron', sans-serif",
+    fontSize: '1rem',
+    margin: '0 10px',
+    transition: 'all 0.2s ease-in-out',
+    minWidth: '120px'
+  };
+
+  const genericErrorButtonStyle = {
+    padding: '12px 24px',
+    borderRadius: '6px',
+    border: 'none',
+    cursor: 'pointer',
+    fontFamily: "'Orbitron', sans-serif",
+    fontSize: '1rem',
+    margin: '0 10px',
+    transition: 'all 0.2s ease-in-out',
+    minWidth: '120px'
+  };
+
   const progressContainerStyle = {
-    width: '90%', // Increased width
+    width: '90%',
     margin: '20px auto',
     padding: '25px',
     backgroundColor: 'rgba(0,0,0,0.8)',
@@ -586,9 +836,8 @@ const SmartAssistant = () => {
     width: `${twoFAInfo?.progress || 0}%`
   };
 
-  // UPDATED: Much larger log container
   const logContainerStyle = {
-    maxHeight: '350px', // Increased from 200px to 350px
+    maxHeight: '350px',
     minHeight: '200px',
     overflowY: 'auto',
     backgroundColor: 'rgba(0,0,0,0.6)',
@@ -636,7 +885,6 @@ const SmartAssistant = () => {
         {error && <p style={{ color: 'red', fontSize: '1.2rem' }}>{error}</p>}
 
         {!showProgress ? (
-          // Normal form view
           <form onSubmit={handleFormSubmit}>
             <div style={inputWrapperStyle}>
               <input 
@@ -676,7 +924,6 @@ const SmartAssistant = () => {
             </motion.button>
           </form>
         ) : (
-          // Progress view
           <div style={progressContainerStyle}>
             <h3 style={{ textAlign: 'center', marginBottom: '20px', fontSize: '1.5rem' }}>
               {twoFAInfo?.done ? 'DATA EXTRACTION COMPLETE!' : 'ACQUIRING DATA...'}
@@ -690,7 +937,6 @@ const SmartAssistant = () => {
               {twoFAInfo?.progress || 0}% Complete
             </div>
 
-            {/* UPDATED: Use uniqueLogs instead of twoFAInfo?.logs */}
             <div style={logContainerStyle}>
               {uniqueLogs.map((log, index) => (
                 <div key={index} style={logEntryStyle}>
@@ -700,7 +946,7 @@ const SmartAssistant = () => {
               ))}
             </div>
 
-            {twoFAInfo?.done && (
+            {twoFAInfo?.done ? (
               <div style={{ textAlign: 'center', marginTop: '20px' }}>
                 <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', alignItems: 'center', flexWrap: 'nowrap' }}>
                   <motion.button 
@@ -729,6 +975,26 @@ const SmartAssistant = () => {
                   </motion.button>
                 </div>
               </div>
+            ) : (
+              // NEW: Cancel button shown when pipeline is running and not done
+              <div style={{ textAlign: 'center', marginTop: '20px' }}>
+                <motion.button 
+                  onClick={handleCancelAcquisition}
+                  style={{ 
+                    ...cancelButtonStyle, 
+                    opacity: cancelling ? 0.6 : 1
+                  }}
+                  whileHover={cancelling ? {} : { 
+                    scale: 1.05, 
+                    boxShadow: '0 0 15px rgba(255,68,68,0.9)',
+                    backgroundColor: 'rgba(255,68,68,0.1)'
+                  }}
+                  disabled={cancelling}
+                >
+                  <FaStop style={{ marginRight: '8px' }} />
+                  {cancelling ? 'Cancelling...' : 'Cancel Data Acquisition'}
+                </motion.button>
+              </div>
             )}
           </div>
         )}
@@ -754,7 +1020,14 @@ const SmartAssistant = () => {
               <p style={{ color: '#afa' }}>{twoFAInfo?.method || 'Waiting for detection...'}</p>
               <p style={{ fontSize: 14 }}>{twoFAInfo?.message || 'Please follow instructions on your device.'}</p>
 
-              {twoFAInfo?.method && twoFAInfo.method.includes('OTP') ? (
+              {otpError && (
+                <p style={{ color: '#f00', fontSize: 14, marginBottom: 10, fontWeight: 'bold' }}>
+                  {otpError}
+                </p>
+              )}
+
+              {/* FIX: Show OTP form for both OTP method AND invalid OTP error */}
+              {(twoFAInfo?.method && twoFAInfo.method.includes('OTP')) || twoFAInfo?.errorType === 'INVALID_OTP' ? (
                 <>
                   <div style={otpContainerStyle} onPaste={(e) => handleOtpPaste(e, 0)}>
                     {Array.from({ length: 6 }).map((_, idx) => (
@@ -778,8 +1051,9 @@ const SmartAssistant = () => {
                     <button 
                       onClick={submitOtp} 
                       style={modalButtonStyle}
+                      disabled={otpSubmitted}
                     >
-                      Submit OTP
+                      {otpSubmitted ? 'Submitting...' : 'Submit OTP'}
                     </button>
                     <button 
                       onClick={handleManualModalClose} 
@@ -869,6 +1143,288 @@ const SmartAssistant = () => {
                   }}
                 >
                   Go Back Anyway
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Authentication Error Modal */}
+        {showAuthErrorModal && (
+          <div style={{
+            position: 'fixed', left: 0, top: 0, right: 0, bottom: 0,
+            background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10001
+          }}>
+            <div style={{ 
+              width: 500, 
+              padding: '24px', 
+              background: '#000', 
+              border: '2px solid #f00', 
+              borderRadius: '8px', 
+              color: '#f00', 
+              textAlign: 'center',
+              boxShadow: '0 0 20px rgba(255,0,0,0.5)'
+            }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: '15px' }}>
+                <FaTimesCircle />
+              </div>
+              <h2 style={{ color: '#f00', marginBottom: '15px', fontSize: '1.5rem' }}>Authentication Error</h2>
+              <p style={{ marginBottom: '20px', fontSize: '1.1rem', lineHeight: '1.5', color: '#f88' }}>
+                {authErrorMessage}
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '15px' }}>
+                <button 
+                  onClick={handleAuthErrorModalClose}
+                  style={{
+                    ...authErrorButtonStyle,
+                    backgroundColor: '#f00',
+                    color: '#fff'
+                  }}
+                  onMouseOver={(e) => {
+                    e.target.style.backgroundColor = '#c00';
+                    e.target.style.transform = 'scale(1.05)';
+                  }}
+                  onMouseOut={(e) => {
+                    e.target.style.backgroundColor = '#f00';
+                    e.target.style.transform = 'scale(1)';
+                  }}
+                >
+                  Try Again
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Push Denied Modal */}
+        {showPushDeniedModal && (
+          <div style={{
+            position: 'fixed', left: 0, top: 0, right: 0, bottom: 0,
+            background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10002
+          }}>
+            <div style={{ 
+              width: 500, 
+              padding: '24px', 
+              background: '#000', 
+              border: '2px solid #f00', 
+              borderRadius: '8px', 
+              color: '#f00', 
+              textAlign: 'center',
+              boxShadow: '0 0 20px rgba(255,0,0,0.5)'
+            }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: '15px' }}>
+                <FaTimesCircle />
+              </div>
+              <h2 style={{ color: '#f00', marginBottom: '15px', fontSize: '1.5rem' }}>Push Notification Denied</h2>
+              <p style={{ marginBottom: '20px', fontSize: '1.1rem', lineHeight: '1.5', color: '#f88' }}>
+                The sign in attempt was denied from your companion device or mobile app.
+              </p>
+              <p style={{ marginBottom: '20px', fontSize: '1rem', color: '#faa' }}>
+                Please try again and make sure to approve the push notification on your device.
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '15px' }}>
+                <button 
+                  onClick={handlePushDeniedModalClose}
+                  style={{
+                    ...pushDeniedButtonStyle,
+                    backgroundColor: '#f00',
+                    color: '#fff'
+                  }}
+                  onMouseOver={(e) => {
+                    e.target.style.backgroundColor = '#c00';
+                    e.target.style.transform = 'scale(1.05)';
+                  }}
+                  onMouseOut={(e) => {
+                    e.target.style.backgroundColor = '#f00';
+                    e.target.style.transform = 'scale(1)';
+                  }}
+                >
+                  Try Again
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Unknown 2FA Modal */}
+        {showUnknown2FAModal && (
+          <div style={{
+            position: 'fixed', left: 0, top: 0, right: 0, bottom: 0,
+            background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10003
+          }}>
+            <div style={{ 
+              width: 550, 
+              padding: '24px', 
+              background: '#000', 
+              border: '2px solid #ff8c00', 
+              borderRadius: '8px', 
+              color: '#ff8c00', 
+              textAlign: 'center',
+              boxShadow: '0 0 20px rgba(255,140,0,0.5)'
+            }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: '15px' }}>
+                <FaPuzzlePiece />
+              </div>
+              <h2 style={{ color: '#ff8c00', marginBottom: '15px', fontSize: '1.5rem' }}>Additional Verification Required</h2>
+              <p style={{ marginBottom: '15px', fontSize: '1.1rem', lineHeight: '1.5', color: '#ffa' }}>
+                Data was acquired too many times with this account.
+              </p>
+              <p style={{ marginBottom: '20px', fontSize: '1rem', color: '#ffb', fontStyle: 'italic' }}>
+                Amazon is asking for additional verification that cannot be automated.
+              </p>
+              <p style={{ marginBottom: '20px', fontSize: '1rem', color: '#ff8' }}>
+                Please try again tomorrow.
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '15px' }}>
+                <button 
+                  onClick={handleUnknown2FAModalClose}
+                  style={{
+                    ...unknown2FAButtonStyle,
+                    backgroundColor: '#ff8c00',
+                    color: '#000'
+                  }}
+                  onMouseOver={(e) => {
+                    e.target.style.backgroundColor = '#ff7b00';
+                    e.target.style.transform = 'scale(1.05)';
+                  }}
+                  onMouseOut={(e) => {
+                    e.target.style.backgroundColor = '#ff8c00';
+                    e.target.style.transform = 'scale(1)';
+                  }}
+                >
+                  Try Again Tomorrow
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Generic Error Modal */}
+        {showGenericErrorModal && (
+          <div style={{
+            position: 'fixed', left: 0, top: 0, right: 0, bottom: 0,
+            background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10004
+          }}>
+            <div style={{ 
+              width: 500, 
+              padding: '24px', 
+              background: '#000', 
+              border: '2px solid #f00', 
+              borderRadius: '8px', 
+              color: '#f00', 
+              textAlign: 'center',
+              boxShadow: '0 0 20px rgba(255,0,0,0.5)'
+            }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: '15px' }}>
+                <FaTimesCircle />
+              </div>
+              <h2 style={{ color: '#f00', marginBottom: '15px', fontSize: '1.5rem' }}>Unexpected Error</h2>
+              <p style={{ marginBottom: '20px', fontSize: '1.1rem', lineHeight: '1.5', color: '#f88' }}>
+                {genericErrorMessage}
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '15px' }}>
+                <button 
+                  onClick={handleGenericErrorModalClose}
+                  style={{
+                    ...genericErrorButtonStyle,
+                    backgroundColor: '#f00',
+                    color: '#fff'
+                  }}
+                  onMouseOver={(e) => {
+                    e.target.style.backgroundColor = '#c00';
+                    e.target.style.transform = 'scale(1.05)';
+                  }}
+                  onMouseOut={(e) => {
+                    e.target.style.backgroundColor = '#f00';
+                    e.target.style.transform = 'scale(1)';
+                  }}
+                >
+                  Try Again
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Cancellation Confirmation Modal */}
+        {showCancelModal && (
+          <div style={{
+            position: 'fixed', left: 0, top: 0, right: 0, bottom: 0,
+            background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10005
+          }}>
+            <div style={{ 
+              width: 450, 
+              padding: '24px', 
+              background: '#000', 
+              border: '2px solid #ff4444', 
+              borderRadius: '8px', 
+              color: '#ff4444', 
+              textAlign: 'center',
+              boxShadow: '0 0 20px rgba(255,68,68,0.5)'
+            }}>
+              <div style={{ fontSize: '2rem', marginBottom: '15px' }}>
+                <FaExclamationTriangle />
+              </div>
+              <h2 style={{ color: '#ff4444', marginBottom: '15px' }}>Cancel Data Acquisition?</h2>
+              <p style={{ marginBottom: '10px', fontSize: '1.1rem' }}>
+                Are you sure you want to cancel the data acquisition?
+              </p>
+              <p style={{ marginBottom: '20px', fontSize: '1rem', color: '#ff8888' }}>
+                This will stop the current process and you will need to start over.
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '15px' }}>
+                <button 
+                  onClick={handleConfirmCancellation}
+                  style={{
+                    padding: '12px 24px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontFamily: "'Orbitron', sans-serif",
+                    fontSize: '1rem',
+                    margin: '0 10px',
+                    transition: 'all 0.2s ease-in-out',
+                    minWidth: '120px',
+                    backgroundColor: '#ff4444',
+                    color: '#fff'
+                  }}
+                  onMouseOver={(e) => {
+                    e.target.style.backgroundColor = '#cc3333';
+                    e.target.style.transform = 'scale(1.05)';
+                  }}
+                  onMouseOut={(e) => {
+                    e.target.style.backgroundColor = '#ff4444';
+                    e.target.style.transform = 'scale(1)';
+                  }}
+                >
+                  Yes, Cancel
+                </button>
+                <button 
+                  onClick={handleCancelModalClose}
+                  style={{
+                    padding: '12px 24px',
+                    borderRadius: '6px',
+                    border: '1px solid #0f0',
+                    cursor: 'pointer',
+                    fontFamily: "'Orbitron', sans-serif",
+                    fontSize: '1rem',
+                    margin: '0 10px',
+                    transition: 'all 0.2s ease-in-out',
+                    minWidth: '120px',
+                    backgroundColor: 'transparent',
+                    color: '#0f0'
+                  }}
+                  onMouseOver={(e) => {
+                    e.target.style.backgroundColor = 'rgba(0,255,0,0.1)';
+                    e.target.style.transform = 'scale(1.05)';
+                  }}
+                  onMouseOut={(e) => {
+                    e.target.style.backgroundColor = 'transparent';
+                    e.target.style.transform = 'scale(1)';
+                  }}
+                  autoFocus
+                >
+                  No, Continue
                 </button>
               </div>
             </div>
