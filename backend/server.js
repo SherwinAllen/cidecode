@@ -65,7 +65,7 @@ app.get('/api/packet-report', (req, res) => {
 });
 
 // In-memory store for live SmartAssistant requests
-const requests = {}; // requestId -> { status, step, method, message, otp, filePath, done, error, userConfirmed2FA }
+const requests = {}; // requestId -> { status, step, progress, logs, method, message, otp, filePath, done, error, userConfirmed2FA, currentUrl, errorType }
 
 // POST entrypoint from frontend SmartAssistant to start headless pipeline
 app.post('/api/packet-report', (req, res) => {
@@ -83,17 +83,116 @@ app.post('/api/packet-report', (req, res) => {
   requests[requestId] = {
     status: 'started',
     step: 'init',
+    progress: 0,
+    logs: [
+      { timestamp: new Date().toISOString(), message: 'Starting data acquisition process...' }
+    ],
     method: null,
     message: null,
     otp: null,
     filePath: null,
     done: false,
     error: null,
-    userConfirmed2FA: false
+    errorType: null,
+    userConfirmed2FA: false,
+    currentUrl: null,
+    showOtpModal: false,
+    otpError: null,
+    // NEW: Track child processes for cancellation
+    childProcesses: []
   };
 
   // respond immediately with requestId so frontend can show UI
   res.json({ requestId });
+
+  // Helper function to add logs and update progress
+  const addLog = (message, progress = null) => {
+    if (requests[requestId]) {
+      requests[requestId].logs.push({
+        timestamp: new Date().toISOString(),
+        message: message
+      });
+      if (progress !== null) {
+        requests[requestId].progress = progress;
+      }
+      console.log(`[${requestId}] ${message}`);
+    }
+  };
+
+  // Helper function to update current URL
+  const updateCurrentUrl = (url) => {
+    if (requests[requestId]) {
+      requests[requestId].currentUrl = url;
+    }
+  };
+
+  // NEW: Enhanced cancelPipeline function to handle user cancellation
+  const cancelPipeline = async (errorType, errorMessage) => {
+    if (requests[requestId]) {
+      console.log(`[${requestId}] Cancelling pipeline due to: ${errorType}`);
+      
+      // Add cancellation log
+      if (requests[requestId].logs) {
+        requests[requestId].logs.push({
+          timestamp: new Date().toISOString(),
+          message: 'Data acquisition cancelled by user. Cleaning up...'
+        });
+      }
+      
+      // Kill all child processes gracefully
+      const cleanupPromises = requests[requestId].childProcesses.map(async (child) => {
+        try {
+          if (!child.killed) {
+            console.log(`[${requestId}] Terminating child process...`);
+            
+            // For spawn processes, use kill with SIGTERM first, then SIGKILL
+            if (child.kill) {
+              child.kill('SIGTERM');
+              console.log(`[${requestId}] Sent SIGTERM to child process`);
+              
+              // Set timeout for force kill
+              return new Promise((resolve) => {
+                const timeout = setTimeout(() => {
+                  if (!child.killed) {
+                    child.kill('SIGKILL');
+                    console.log(`[${requestId}] Force killed child process with SIGKILL`);
+                  }
+                  resolve();
+                }, 3000);
+                
+                // Clear timeout if process exits normally
+                child.on('exit', () => {
+                  clearTimeout(timeout);
+                  console.log(`[${requestId}] Child process exited normally`);
+                  resolve();
+                });
+              });
+            } else {
+              // For exec processes, just kill them
+              child.kill();
+              console.log(`[${requestId}] Killed exec child process`);
+            }
+          }
+        } catch (err) {
+          console.warn(`[${requestId}] Error killing child process:`, err.message);
+        }
+      });
+
+      // Wait for all cleanup to complete
+      await Promise.all(cleanupPromises);
+      
+      // Clear the array
+      requests[requestId].childProcesses = [];
+      
+      // Set cancellation state
+      requests[requestId].errorType = errorType;
+      requests[requestId].status = 'cancelled';
+      requests[requestId].error = errorMessage;
+      requests[requestId].done = false;
+      
+      console.log(`[${requestId}] Pipeline cancelled and cleaned up`);
+    }
+  };
 
   // run background pipeline for this request
   (async () => {
@@ -106,76 +205,327 @@ app.post('/api/packet-report', (req, res) => {
     const env = { ...process.env, AMAZON_EMAIL: email, AMAZON_PASSWORD: password, REQUEST_ID: requestId };
 
     try {
+      // Step 1: Generating cookies
       requests[requestId].step = 'cookies';
       requests[requestId].status = 'running';
-      console.log(`[${requestId}] Step 1: Generating Amazon cookies (headless)...`);
+      addLog('Establishing secure connection...', 10);
 
       // spawn node script (so we can capture exit and not block main thread)
       const child = spawn('node', [cookiesScript], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      
+      // NEW: Track child process for potential cancellation
+      requests[requestId].childProcesses.push(child);
 
-      child.stdout.on('data', (d) => console.log(`[${requestId}] cookies stdout: ${d.toString()}`));
-      child.stderr.on('data', (d) => console.error(`[${requestId}] cookies stderr: ${d.toString()}`));
+      let cookieOutput = '';
+      let cookieError = '';
+      
+      child.stdout.on('data', (d) => {
+        const data = d.toString();
+        cookieOutput += data;
+        
+        // Extract and update current URL from cookie script output
+        const urlMatch = data.match(/Current URL: (https?:\/\/[^\s]+)/);
+        if (urlMatch) {
+          updateCurrentUrl(urlMatch[1]);
+        }
+        
+        // Look for specific progress indicators from the cookie script
+        if (data.includes('Navigating to Alexa activity page') || data.includes('Checking authentication state')) {
+          addLog('Verifying account credentials...', 20);
+        }
+        if (data.includes('2FA detected')) {
+          addLog('Two-factor authentication required...', 25);
+        }
+        if (data.includes('Push notification page')) {
+          addLog('Push notification sent to your device. Please approve to continue...', 30);
+        }
+        if (data.includes('Secure connection established')) {
+          addLog('Secure connection established successfully', 35);
+        }
+        // Detect when we've successfully reached the target page
+        if (data.includes('Successfully reached Alexa activity page')) {
+          updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
+          addLog('Authentication completed successfully', 40);
+        }
+
+        // In the cookie script stdout handler, add this condition:
+        if (data.includes('OTP authentication completed successfully')) {
+          // Clear any OTP error state since authentication succeeded
+          requests[requestId].errorType = null;
+          requests[requestId].otpError = null;
+          requests[requestId].showOtpModal = false;
+          addLog('OTP verification successful! Continuing data extraction...', 40);
+        }
+
+        // NEW: Detect authentication errors from the cookie script and CANCEL PIPELINE
+        if (data.includes('INVALID_EMAIL')) {
+          cancelPipeline('INVALID_EMAIL', 'Invalid email address provided');
+          addLog('The email address is not associated with an Amazon account. Please check your email and try again.', null);
+          return;
+        }
+        if (data.includes('INCORRECT_PASSWORD')) {
+          cancelPipeline('INCORRECT_PASSWORD', 'Incorrect password provided');
+          addLog('The password is incorrect. Please check your password and try again.', null);
+          return;
+        }
+        if (data.includes('Push notification was denied')) {
+          cancelPipeline('PUSH_DENIED', 'Push notification was denied');
+          addLog('Sign in attempt was denied from your device. Please try again and approve the notification.', null);
+          return;
+        }
+        // NEW: Detect unknown 2FA page
+        if (data.includes('UNKNOWN_2FA_PAGE') || data.includes('Unknown 2FA page detected')) {
+          cancelPipeline('UNKNOWN_2FA_PAGE', 'Unknown 2FA page detected');
+          addLog('This account has been accessed too many times with this account. Please try again tomorrow.', null);
+          return;
+        }
+        // NEW: Detect unexpected errors from the cookie script
+        if (data.includes('UNEXPECTED_ERROR') || data.includes('An unexpected error occurred during authentication')) {
+          cancelPipeline('GENERIC_ERROR', 'An unexpected error occurred during authentication. Please try again.');
+          addLog('An unexpected error occurred during authentication. Please try again.', null);
+          return;
+        }
+        // FIX: Only detect OTP verification failure if we're still in OTP context
+        if ((data.includes('OTP verification failed') || data.includes('INVALID_OTP')) && 
+            !data.includes('OTP authentication completed successfully')) {
+          // For OTP failures, we don't cancel immediately - allow retry
+          requests[requestId].errorType = 'INVALID_OTP';
+          requests[requestId].status = 'waiting_for_2fa';
+          requests[requestId].showOtpModal = true;
+          requests[requestId].otpError = 'The code you entered is not valid. Please check the code and try again.';
+          addLog('OTP verification failed. Please enter the correct code.', null);
+        }
+      });
+      
+      child.stderr.on('data', (d) => {
+        const errorData = d.toString();
+        cookieError += errorData;
+        console.error(`[${requestId}] cookies stderr: ${errorData}`);
+        
+        // NEW: Also check stderr for authentication errors and CANCEL PIPELINE
+        if (errorData.includes('INVALID_EMAIL')) {
+          cancelPipeline('INVALID_EMAIL', 'Invalid email address provided');
+          addLog('The email address is not associated with an Amazon account. Please check your email and try again.', null);
+          return;
+        }
+        if (errorData.includes('INCORRECT_PASSWORD')) {
+          cancelPipeline('INCORRECT_PASSWORD', 'Incorrect password provided');
+          addLog('The password is incorrect. Please check your password and try again.', null);
+          return;
+        }
+        if (errorData.includes('Push notification was denied')) {
+          cancelPipeline('PUSH_DENIED', 'Push notification was denied');
+          addLog('Sign in attempt was denied from your device. Please try again and approve the notification.', null);
+          return;
+        }
+        // NEW: Detect unknown 2FA page
+        if (errorData.includes('UNKNOWN_2FA_PAGE') || errorData.includes('Unknown 2FA page detected')) {
+          cancelPipeline('UNKNOWN_2FA_PAGE', 'Unknown 2FA page detected');
+          addLog('This account has been accessed too many times with this account. Please try again tomorrow.', null);
+          return;
+        }
+        // NEW: Detect unexpected errors
+        if (errorData.includes('UNEXPECTED_ERROR') || errorData.includes('An unexpected error occurred during authentication')) {
+          cancelPipeline('GENERIC_ERROR', 'An unexpected error occurred during authentication. Please try again.');
+          addLog('An unexpected error occurred during authentication. Please try again.', null);
+          return;
+        }
+        // FIX: Only detect OTP verification failure if we're still in OTP context
+        if ((errorData.includes('OTP verification failed') || errorData.includes('INVALID_OTP')) && 
+            !errorData.includes('OTP authentication completed successfully')) {
+          // For OTP failures, we don't cancel immediately - allow retry
+          requests[requestId].errorType = 'INVALID_OTP';
+          requests[requestId].status = 'waiting_for_2fa';
+          requests[requestId].showOtpModal = true;
+          requests[requestId].otpError = 'The code you entered is not valid. Please check the code and try again.';
+          addLog('OTP verification failed. Please enter the correct code.', null);
+        }
+      });
 
       const exitCode = await new Promise((resolve) => child.on('close', resolve));
-      if (exitCode !== 0) {
-        throw new Error(`GenerateAmazonCookie exited with ${exitCode}`);
+      
+      // NEW: Remove child from tracking after it closes
+      requests[requestId].childProcesses = requests[requestId].childProcesses.filter(cp => cp !== child);
+      
+      // NEW: Check if pipeline was cancelled due to authentication error
+      if (requests[requestId].errorType && 
+          ['INVALID_EMAIL', 'INCORRECT_PASSWORD', 'PUSH_DENIED', 'UNKNOWN_2FA_PAGE', 'CANCELLED'].includes(requests[requestId].errorType)) {
+        console.log(`[${requestId}] Pipeline cancelled due to authentication error: ${requests[requestId].errorType}`);
+        return; // Stop the pipeline completely
       }
-      console.log(`[${requestId}] Cookies generated.`);
+      
+      // NEW: Check for authentication errors after process completion
+      if (requests[requestId].errorType === 'INVALID_EMAIL' || 
+          requests[requestId].errorType === 'INCORRECT_PASSWORD' ||
+          requests[requestId].errorType === 'PUSH_DENIED' ||
+          requests[requestId].errorType === 'UNKNOWN_2FA_PAGE' ||
+          requests[requestId].errorType === 'CANCELLED') {
+        // Authentication error already handled above, just return early
+        return;
+      }
+      
+      if (exitCode !== 0 && !requests[requestId].errorType) {
+        throw new Error(`GenerateAmazonCookie exited with ${exitCode}: ${cookieError}`);
+      }
+      
+      // If we have an OTP error but the process is still running, continue
+      if (requests[requestId].errorType === 'INVALID_OTP') {
+        // Don't throw error, let the frontend handle OTP retry
+        console.log(`[${requestId}] OTP verification failed, waiting for retry...`);
+        return;
+      }
+      
+      // Ensure we mark authentication as complete
+      if (!requests[requestId].currentUrl?.includes('/alexa-privacy/apd/')) {
+        updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
+      }
+      addLog('Authentication completed successfully', 40);
 
-      // Step 2: fetch Alexa activity
-      requests[requestId].step = 'fetch';
-      requests[requestId].status = 'running';
-      console.log(`[${requestId}] Step 2: Fetching Alexa activity...`);
-      await new Promise((resolve, reject) => {
-        exec(`python3 "${fetchScript}"`, { env }, (err, stdout, stderr) => {
-          if (err) {
-            console.error(`[${requestId}] fetch error:`, err);
-            return reject(err);
+      // Step 2: fetch Alexa activity - ONLY RUN IF AUTHENTICATION SUCCEEDED
+      if (!requests[requestId].errorType) {
+        requests[requestId].step = 'fetch';
+        requests[requestId].status = 'running';
+        addLog('Starting data extraction from your account...', 45);
+
+        let activityCount = 0;
+        // In the fetch step, replace the custom object with the actual process:
+        const fetchProcess = exec(`python3 "${fetchScript}"`, { env });
+
+        // Track the actual process with a simple wrapper
+        const fetchChild = {
+          kill: () => {
+            try {
+              fetchProcess.kill();
+              console.log(`[${requestId}] Killed fetch process`);
+            } catch (err) {
+              console.warn(`[${requestId}] Error killing fetch process:`, err.message);
+            }
           }
-          console.log(`[${requestId}] fetchAlexaActivity stdout:`, stdout);
-          if (stderr) console.error(`[${requestId}] fetchAlexaActivity stderr:`, stderr);
-          resolve();
-        });
-      });
-
-      // Step 3: Sync transcripts
-      requests[requestId].step = 'sync';
-      console.log(`[${requestId}] Step 3: Syncing audio transcripts...`);
-      await new Promise((resolve, reject) => {
-        exec(`python3 "${syncScript}"`, { env }, (err, stdout, stderr) => {
-          if (err) {
-            console.error(`[${requestId}] sync error:`, err);
-            return reject(err);
+        };
+        requests[requestId].childProcesses.push(fetchChild);
+        
+        fetchProcess.stdout.on('data', (data) => {
+          const output = data.toString();
+          console.log(`[${requestId}] fetchAlexaActivity stdout:`, output);
+          
+          // Parse activity count from Python script output
+          const activityMatch = output.match(/Processing (\d+) to (\d+)/);
+          if (activityMatch) {
+            const currentCount = parseInt(activityMatch[2]);
+            if (currentCount > activityCount) {
+              activityCount = currentCount;
+              const progress = Math.min(45 + Math.floor((currentCount / 50) * 40), 85); // 45-85% based on activities
+              addLog(`Extracted data from ${currentCount} activities so far...`, progress);
+            }
           }
-          console.log(`[${requestId}] SyncAudioTranscripts stdout:`, stdout);
-          if (stderr) console.error(`[${requestId}] SyncAudioTranscripts stderr:`, stderr);
-          resolve();
-        });
-      });
-
-      // Step 4: hash and prepare JSON path for download
-      requests[requestId].step = 'hash';
-      console.log(`[${requestId}] Step 4: Hashing JSON...`);
-      await new Promise((resolve, reject) => {
-        exec(`python3 "${hashScript}" "${jsonPath}"`, { env }, (err, stdout, stderr) => {
-          if (err) {
-            console.warn(`[${requestId}] hash error:`, err);
-            return reject(err);
+          
+          // Check for completion
+          if (output.includes('PROCESSING COMPLETE') || output.includes('OPTIMIZED EXTRACTION COMPLETE')) {
+            const finalMatch = output.match(/Total activities processed: (\d+)/);
+            if (finalMatch) {
+              activityCount = parseInt(finalMatch[1]);
+              addLog(`Successfully extracted data from ${activityCount} activities`, 85);
+            }
           }
-          console.log(`[${requestId}] hash output:`, stdout);
-          resolve();
         });
-      });
+        
+        fetchProcess.stderr.on('data', (data) => {
+          console.error(`[${requestId}] fetchAlexaActivity stderr:`, data.toString());
+        });
 
-      requests[requestId].step = 'completed';
-      requests[requestId].filePath = jsonPath;
-      requests[requestId].done = true;
-      requests[requestId].status = 'completed';
-      console.log(`[${requestId}] Pipeline completed successfully.`);
+        await new Promise((resolve, reject) => {
+          fetchProcess.on('close', (code) => {
+            // Remove from tracking
+            requests[requestId].childProcesses = requests[requestId].childProcesses.filter(cp => cp !== fetchChild);
+            
+            if (code === 0) {
+              resolve();
+            } else {
+              reject(new Error(`fetchAlexaActivity exited with code ${code}`));
+            }
+          });
+        });
+
+        // Step 3: Sync transcripts - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
+        if (!requests[requestId].errorType) {
+          requests[requestId].step = 'sync';
+          addLog('Organizing extracted data...', 90);
+          
+          await new Promise((resolve, reject) => {
+            exec(`python3 "${syncScript}"`, { env }, (err, stdout, stderr) => {
+              if (err) {
+                console.error(`[${requestId}] sync error:`, err);
+                return reject(err);
+              }
+              console.log(`[${requestId}] SyncAudioTranscripts stdout:`, stdout);
+              if (stderr) console.error(`[${requestId}] SyncAudioTranscripts stderr:`, stderr);
+              
+              // Parse final stats from sync script
+              if (stdout.includes('Final mapping saved')) {
+                const mappingMatch = stdout.match(/entries: (\d+)\)/);
+                if (mappingMatch) {
+                  addLog(`Data organization complete (${mappingMatch[1]} entries processed)`, 95);
+                }
+              }
+              resolve();
+            });
+          });
+
+          // Step 4: hash and prepare JSON path for download - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
+          if (!requests[requestId].errorType) {
+            requests[requestId].step = 'hash';
+            addLog('Finalizing data package...', 98);
+            
+            await new Promise((resolve, reject) => {
+              exec(`python3 "${hashScript}" "${jsonPath}"`, { env }, (err, stdout, stderr) => {
+                if (err) {
+                  console.warn(`[${requestId}] hash error:`, err);
+                  // Don't reject here as hash failure shouldn't stop the download
+                }
+                console.log(`[${requestId}] hash output:`, stdout);
+                resolve();
+              });
+            });
+
+            requests[requestId].step = 'completed';
+            requests[requestId].filePath = jsonPath;
+            requests[requestId].done = true;
+            requests[requestId].status = 'completed';
+            addLog('Data extraction complete! Your file is ready for download.', 100);
+            
+            console.log(`[${requestId}] Pipeline completed successfully.`);
+          }
+        }
+      }
     } catch (err) {
       console.error(`[${requestId}] Pipeline error:`, err.message || err);
-      requests[requestId].status = 'error';
-      requests[requestId].error = (err && err.message) || String(err);
+      
+      // Don't override specific error types that were already set
+      if (!requests[requestId].errorType) {
+        requests[requestId].status = 'error';
+        
+        // Convert technical errors to user-friendly messages
+        let userFriendlyMessage = 'An unexpected error occurred. Please try again.';
+        
+        if (err.message.includes('push notification') || err.message.includes('Push')) {
+          userFriendlyMessage = 'Push notification was not approved in time. Please try again and make sure to approve the notification on your device.';
+        } else if (err.message.includes('2FA') || err.message.includes('authentication')) {
+          userFriendlyMessage = 'Authentication failed. Please check your credentials and try again.';
+        } else if (err.message.includes('credentials') || err.message.includes('password') || err.message.includes('email')) {
+          userFriendlyMessage = 'Invalid email or password. Please check your credentials and try again.';
+        } else if (err.message.includes('timeout') || err.message.includes('timed out')) {
+          userFriendlyMessage = 'The request timed out. Please try again.';
+        } else if (err.message.includes('network') || err.message.includes('connection')) {
+          userFriendlyMessage = 'Network connection error. Please check your internet connection and try again.';
+        } else if (err.message.includes('UNEXPECTED_ERROR')) {
+          userFriendlyMessage = 'An unexpected error occurred during authentication. Please try again.';
+        }
+        
+        requests[requestId].error = userFriendlyMessage;
+        requests[requestId].errorType = 'GENERIC_ERROR';
+        
+        addLog(userFriendlyMessage, null);
+      }
     }
   })();
 });
@@ -185,6 +535,7 @@ app.get('/api/2fa-status/:id', (req, res) => {
   const id = req.params.id;
   const info = requests[id];
   if (!info) return res.status(404).send('Not found');
+  
   res.json(info);
 });
 
@@ -196,7 +547,20 @@ app.post('/api/submit-otp/:id', (req, res) => {
   if (!info) return res.status(404).send('Not found');
   info.otp = otp;
   info.status = 'otp_submitted';
+  info.otpError = null; // Clear any previous OTP errors
+  info.showOtpModal = false; // NEW: Immediately hide OTP modal after submission
   console.log(`[${id}] OTP received from frontend (masked): ${otp ? otp.replace(/\d/g,'*') : ''}`);
+  res.json({ ok: true });
+});
+
+// NEW: Clear OTP for retry
+app.post('/api/internal/clear-otp/:id', (req, res) => {
+  const id = req.params.id;
+  const info = requests[id];
+  if (!info) return res.status(404).send('Not found');
+  info.otp = null;
+  info.otpError = null;
+  console.log(`[${id}] OTP cleared for retry`);
   res.json({ ok: true });
 });
 
@@ -210,16 +574,135 @@ app.post('/api/confirm-2fa/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// NEW: Endpoint to cancel pipeline execution
+app.post('/api/cancel-acquisition/:id', async (req, res) => {
+  const id = req.params.id;
+  const info = requests[id];
+  if (!info) return res.status(404).send('Not found');
+
+  console.log(`[${id}] User requested cancellation of pipeline`);
+
+  // NEW: Enhanced cancelPipeline function to handle user cancellation
+  const cancelPipeline = async (requestId, errorType, errorMessage) => { // CHANGED: Add requestId parameter
+    if (requests[requestId]) {
+      console.log(`[${requestId}] Cancelling pipeline due to: ${errorType}`);
+      
+      // Add cancellation log
+      if (requests[requestId].logs) {
+        requests[requestId].logs.push({
+          timestamp: new Date().toISOString(),
+          message: 'Data acquisition cancelled by user. Cleaning up...'
+        });
+      }
+      
+      // Kill all child processes - handle both spawn and exec processes
+      const cleanupPromises = requests[requestId].childProcesses.map(async (child) => {
+        try {
+          // For spawn processes (actual ChildProcess objects)
+          if (child && typeof child.kill === 'function' && child.pid) {
+            console.log(`[${requestId}] Terminating spawn process (PID: ${child.pid})...`);
+            child.kill('SIGTERM');
+            
+            // Wait for process to exit with timeout
+            return new Promise((resolve) => {
+              const timeout = setTimeout(() => {
+                if (child.exitCode === null) {
+                  child.kill('SIGKILL');
+                  console.log(`[${requestId}] Force killed spawn process with SIGKILL`);
+                }
+                resolve();
+              }, 3000);
+              
+              child.on('exit', () => {
+                clearTimeout(timeout);
+                console.log(`[${requestId}] Spawn process exited normally`);
+                resolve();
+              });
+            });
+          } 
+          // For exec processes (custom objects with kill method)
+          else if (child && typeof child.kill === 'function') {
+            console.log(`[${requestId}] Killing exec process...`);
+            child.kill();
+            console.log(`[${requestId}] Exec process killed`);
+            return Promise.resolve();
+          } 
+          // For any other type, just log and continue
+          else {
+            console.warn(`[${requestId}] Unknown child process type:`, typeof child);
+            return Promise.resolve();
+          }
+        } catch (err) {
+          console.warn(`[${requestId}] Error killing child process:`, err.message);
+          return Promise.resolve();
+        }
+      });
+
+      // Wait for all cleanup to complete
+      await Promise.all(cleanupPromises);
+      
+      // Clear the array
+      requests[requestId].childProcesses = [];
+      
+      // Set cancellation state
+      requests[requestId].errorType = errorType;
+      requests[requestId].status = 'cancelled';
+      requests[requestId].error = errorMessage;
+      requests[requestId].done = false;
+      
+      console.log(`[${requestId}] Pipeline cancelled and cleaned up`);
+    }
+  };
+
+  // Cancel the pipeline - pass the id as parameter
+  await cancelPipeline(id, 'CANCELLED', 'Data acquisition was cancelled by user.');
+
+  res.json({ ok: true, message: 'Pipeline cancelled successfully' });
+});
+
 // Internal endpoint used by the headless node script to set detected method / message
 app.post('/api/internal/2fa-update/:id', (req, res) => {
   const id = req.params.id;
-  const { method, message } = req.body;
+  const { method, message, currentUrl, errorType, otpError, showOtpModal } = req.body;
   const info = requests[id];
   if (!info) return res.status(404).send('Not found');
-  info.method = method;
+  
+  // FIX: Only update method if it's provided and not null/undefined
+  if (method !== undefined && method !== null) {
+    info.method = method;
+  }
+  
   info.message = message || null;
   info.status = 'waiting_for_2fa';
-  console.log(`[${id}] 2FA update from headless script:`, method, message);
+  
+  // NEW: Handle OTP modal display and errors
+  if (errorType === 'INVALID_OTP') {
+    info.errorType = errorType;
+    info.showOtpModal = showOtpModal !== undefined ? showOtpModal : true; // NEW: Reopen OTP modal for invalid OTP
+    info.otpError = otpError || 'The code you entered is not valid. Please check the code and try again.';
+    // FIX: Ensure method is set to OTP when we have invalid OTP
+    if (!info.method || !info.method.includes('OTP')) {
+      info.method = 'OTP (SMS/Voice)';
+    }
+  } else if (errorType === 'PUSH_DENIED') {
+    info.errorType = errorType;
+    info.status = 'error';
+    info.error = message || 'Push notification was denied';
+    info.showOtpModal = false; // Ensure OTP modal is closed
+  } else if (errorType === 'UNKNOWN_2FA_PAGE') {
+    info.errorType = errorType;
+    info.status = 'error';
+    info.error = message || 'Unknown 2FA page detected';
+    info.showOtpModal = false; // Ensure OTP modal is closed
+  } else {
+    info.showOtpModal = showOtpModal !== undefined ? showOtpModal : (method && method.includes('OTP'));
+    info.otpError = null;
+  }
+  
+  if (currentUrl) {
+    info.currentUrl = currentUrl;
+  }
+  console.log(`[${id}] 2FA update from headless script:`, method, message, currentUrl, errorType, showOtpModal);
   res.json({ ok: true });
 });
 
@@ -228,7 +711,12 @@ app.get('/api/internal/get-otp/:id', (req, res) => {
   const id = req.params.id;
   const info = requests[id];
   if (!info) return res.status(404).send('Not found');
-  res.json({ otp: info.otp || null, userConfirmed2FA: !!info.userConfirmed2FA });
+  res.json({ 
+    otp: info.otp || null, 
+    userConfirmed2FA: !!info.userConfirmed2FA,
+    showOtpModal: !!info.showOtpModal,
+    otpError: info.otpError || null
+  });
 });
 
 // Download endpoint once pipeline is complete
