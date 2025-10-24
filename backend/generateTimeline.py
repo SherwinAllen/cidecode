@@ -124,7 +124,7 @@ def main():
     directory = "./"
     
     # Append the log events frequency graph using "logcat_capture.txt"
-    log_file = os.path.join(directory, "watch_logs", "logcat_capture.txt")
+    log_file = os.path.join(directory, "logcat_capture.txt")
     if os.path.exists(log_file):
         counts = count_events_by_day_hour(log_file)
         plot_log_events(doc, counts)
@@ -132,7 +132,7 @@ def main():
         print(f"Log file not found: {log_file}")
     
     # Append the steps per day graph from the CSV file
-    csv_file = os.path.join(directory, "watch_logs", "com.samsung.shealth.step_daily_trend.20250308223308.csv.xls")
+    csv_file = os.path.join(directory, "com.samsung.shealth.step_daily_trend.20250308223308.csv.xls")
     if os.path.exists(csv_file):
         plot_steps_per_day(csv_file, doc)
     else:

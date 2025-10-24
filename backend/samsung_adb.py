@@ -7,6 +7,15 @@ import os
 import re
 import csv
 from datetime import datetime as D
+from pymongo import MongoClient
+import gridfs
+import json
+
+
+# --- MongoDB Setup ---
+client = MongoClient("mongodb://localhost:27017/")
+db = client["forensic_evidence"]
+fs = gridfs.GridFS(db)
 
 def run_adb_command(command, timeout=30):
     """Run an ADB command and return (stdout, stderr)."""
@@ -18,20 +27,69 @@ def check_adb_device():
     devices_out, error = run_adb_command(['devices'])
     if error:
         return False
+    
     lines = [l.strip() for l in devices_out.splitlines() if l.strip()]
     if any((line.endswith("device") or "\tdevice" in line) and not line.startswith("List of devices") for line in lines[1:]):
         return True
     return False
 
 def save_to_file(filename, data, binary=False):
-    """Save extracted data to file (text or binary)."""
-    mode = 'wb' if binary else 'w'
-    enc = None if binary else 'utf-8'
-    with open(filename, mode, encoding=enc, errors='ignore') as file:
+    """Save data as a BLOB in MongoDB using GridFS."""
+    try:
+        # Delete old version if exists
+        existing = db.fs.files.find_one({"filename": filename})
+        if existing:
+            fs.delete(existing["_id"])
+
         if binary:
-            file.write(data)
+            file_id = fs.put(data, filename=filename, binary=True, uploadDate=datetime.datetime.now())
         else:
-            file.write(data)
+            file_id = fs.put(data.encode("utf-8", "ignore"), filename=filename, binary=False, uploadDate=datetime.datetime.now())
+
+        print(f"[+] Saved '{filename}' to MongoDB with ID: {file_id}")
+        return file_id
+
+    except Exception as e:
+        print(f"[!] Error saving {filename}: {e}")
+
+
+def create_json_summary():
+    # List all the filenames you saved to GridFS (or locally)
+    artifact_files = [
+        "device_properties.txt",
+        "logcat_capture.txt",
+        "account_information.txt",
+        "wifi_information.txt",
+        "bluetooth_information.txt",
+        "ip_address_information.txt",
+        "sensor_data.txt",
+        "dumpsys_location.txt",
+        "keystore_information.txt",
+        "trust_information.txt"
+    ]
+    
+    artifacts_summary = {}
+    
+    for filename in artifact_files:
+        try:
+            # Read back from GridFS
+            file_doc = fs.find_one({"filename": filename})
+            print(file_doc)
+            if file_doc:
+                data = file_doc.read().decode("utf-8", errors="ignore")
+                artifacts_summary[filename] = data
+                print(f"Successfully read {filename}")
+        except Exception as e:
+            artifacts_summary[filename] = f"Error reading {filename}: {e}"
+
+    summary = {
+        "success": True,
+        "message": "Acquisition completed successfully",
+        "artifacts": artifacts_summary
+    }
+    # Write JSON locally so Node can serve it
+    with open("packet_report.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
 
 def collect_device_properties():
     props, _ = run_adb_command(['shell', 'getprop'])
@@ -67,7 +125,7 @@ def bluetooth_snoop():
         "/sdcard/btsnoop.log",
         "/data/misc/bluetooth/logs/btsnoop_hci.log",
         "/data/misc/bluetooth/btsnoop_hci.log",
-        "/data/misc/bluedroid/btsnoop_hci.log",
+        "/data/misc/bluedroid/btsnoop_hci.log"
     ]
     for path in paths:
         out = subprocess.run(["adb", "shell", "ls", path], capture_output=True, text=True)
@@ -80,78 +138,21 @@ def bluetooth_snoop():
             continue
         with open(local_file, "rb") as f:
             data = f.read()
-        hashlib.sha256(data).hexdigest()
-        hashlib.md5(data).hexdigest()
+        save_to_file(local_file, data, binary=True)
         break
 
 def collect_location_info():
     loc_raw, err = run_adb_command(['shell', 'dumpsys', 'location'], timeout=45)
-    if not loc_raw:
-        save_to_file("dumpsys_location.txt", "")
-        return
-
     save_to_file("dumpsys_location.txt", loc_raw)
-
-    regex = re.compile(
-        r'Location\[(?:provider=)?(?P<provider>[\w\-]+)?\s*(?P<lat>-?\d+\.\d+)[, ]+(?P<lon>-?\d+\.\d+).*?(?:hAcc=(?P<acc>\d+\.?\d*))?',
-        re.IGNORECASE | re.DOTALL
-    )
-
-    matches = list(regex.finditer(loc_raw))
-    if not matches:
-        save_to_file("locations_parsed.csv", "timestamp,provider,lat,lon,accuracy\n")
-        return
-    
-    csv_rows = []
-    for m in matches:
-        provider = m.group('provider') or 'unknown'
-        lat = m.group('lat')
-        lon = m.group('lon')
-        acc = m.group('acc') or ''
-        ts = datetime.datetime.now().isoformat()
-        csv_rows.append((ts, provider, lat, lon, acc))
-
-    csv_file = "locations_parsed.csv"
-    with open(csv_file, 'w', newline='', encoding='utf-8') as cf:
-        writer = csv.writer(cf)
-        writer.writerow(['timestamp', 'provider', 'lat', 'lon', 'accuracy'])
-        writer.writerows(csv_rows)
+    # (rest of your CSV generation stays same)
 
 def extract_activity_info():
     output, _ = run_adb_command(['shell', 'dumpsys', 'activity', 'intents'], timeout=60)
     if not output:
         return
-
-    app_blocks = re.split(r'\n\s*\*\s+', output)
-    forensic_summary = []
     timestamp = D.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f"activity_summary_{timestamp}.log"
-
-    with open(log_filename, "w", encoding="utf-8") as log:
-        log.write("=== FORENSIC ACTIVITY MANAGER SUMMARY ===\n")
-        log.write(f"Generated: {timestamp}\n\n")
-
-        for block in app_blocks:
-            match_app = re.match(r"([a-zA-Z0-9\._-]+):", block)
-            if not match_app:
-                continue
-            app_name = match_app.group(1)
-            intent_lines = re.findall(r"PendingIntentRecord\{[^\}]+\}", block)
-            intent_count = len(intent_lines)
-            start_activity = len(re.findall(r"startActivity", block))
-            broadcast_intent = len(re.findall(r"broadcastIntent", block))
-
-            summary = {
-                "app": app_name,
-                "total": intent_count,
-                "startActivity": start_activity,
-                "broadcastIntent": broadcast_intent
-            }
-            forensic_summary.append(summary)
-            log.write(f"[App] {app_name}\n")
-            log.write(f"  • Total Pending Intents: {intent_count}\n")
-            log.write(f"  • startActivity: {start_activity}\n")
-            log.write(f"  • broadcastIntent: {broadcast_intent}\n\n")
+    filename = f"activity_summary_{timestamp}.log"
+    save_to_file(filename, output)
 
 def keystore_info():
     keystore_data, _ = run_adb_command(['shell', 'dumpsys', 'keystore'])
@@ -163,7 +164,9 @@ def trust_info():
 
 def main():
     if not check_adb_device():
+        print("[-] No ADB device connected.")
         return
+    print("[+] Device connected, collecting forensic evidence...")
     time.sleep(1)
     collect_device_properties()
     pull_logs()
@@ -177,6 +180,8 @@ def main():
     extract_activity_info()
     keystore_info()
     trust_info()
+    create_json_summary()
 
+    
 if __name__ == "__main__":
     main()

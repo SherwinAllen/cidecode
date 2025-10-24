@@ -1,14 +1,39 @@
-import docx
-from docx.shared import Pt
-import os
-import re
+from pymongo import MongoClient
+import gridfs
 import pandas as pd
-import matplotlib.pyplot as plt
-import datetime
+import docx
+import re
 from collections import Counter
 import tempfile
+import matplotlib.pyplot as plt
+from fastapi.responses import FileResponse
+from flask import Flask
+import datetime
+import os
+import json
+
+app = Flask(__name__)
+
+# ---------------- MongoDB Setup ----------------
+client = MongoClient("mongodb://localhost:27017/")
+db = client["forensic_evidence"]
+fs = gridfs.GridFS(db)
 
 
+def get_file_from_mongo(filename):
+    """Fetch a file from MongoDB GridFS and return content as text."""
+    file_doc = fs.find_one({"filename": filename})
+    if not file_doc:
+        print(f"[-] File '{filename}' not found in MongoDB.")
+        return ""
+    try:
+        print(f"File {filename} Found")
+        data = file_doc.read()
+        # Decode text files; binary files can be handled separately if needed
+        return data.decode("utf-8", errors="ignore")
+    except Exception as e:
+        print(f"[!] Error reading {filename} from MongoDB: {e}")
+        return ""
 
 def extract_logs_from_file(filepath):
     """Reads up to 20 lines from the given file."""
@@ -163,65 +188,6 @@ def add_dataframe_to_doc(doc, df, title, max_cols_per_table=5):
         start += max_cols_per_table
         table_index += 1
 
-
-def create_table_with_raw_data(doc, category, parsed_data, raw_lines, headers):
-    """Main logic for table creation per category."""
-    doc.add_paragraph(category, style='Heading2')
-
-    # For Sensor Data, override headers
-    if category == "Sensor Data":
-        headers = ["Sensor ID", "Active Count", "Sampling Period", "Batching Period", "Selected"]
-
-    extended_headers = headers + ["Raw Data"]
-    table = doc.add_table(rows=1, cols=len(extended_headers))
-    table.style = "Table Grid"
-    table.autofit = True
-
-    # Header row
-    hdr_cells = table.rows[0].cells
-    for i, header in enumerate(extended_headers):
-        hdr_cells[i].text = header
-        for paragraph in hdr_cells[i].paragraphs:
-            for run in paragraph.runs:
-                run.bold = True
-
-    # Fill rows
-    for idx, raw_line in enumerate(raw_lines):
-        row_cells = table.add_row().cells
-        if category == "Sensor Data":
-            pass
-        else:
-            row_tokens = parsed_data[idx] if idx < len(parsed_data) else []
-            if len(headers) == 2:  # Field-Value
-                if len(row_tokens) == 0:
-                    row_cells[0].text, row_cells[1].text = "", ""
-                else:
-                    field = " ".join(row_tokens[:-1]) if len(row_tokens) > 1 else row_tokens[0]
-                    value = row_tokens[-1] if len(row_tokens) > 1 else ""
-                    row_cells[0].text, row_cells[1].text = field, value
-            else:
-                if len(row_tokens) < len(headers):
-                    row_tokens += [""] * (len(headers) - len(row_tokens))
-                elif len(row_tokens) > len(headers):
-                    row_tokens = row_tokens[:len(headers)-1] + [" ".join(row_tokens[len(headers)-1:])]
-                for col_index, item in enumerate(row_tokens):
-                    row_cells[col_index].text = str(item)
-
-        row_cells[len(headers)].text = raw_line
-
-    doc.add_paragraph('\n')
-
-    # For Sensor Data, make separate tables for each sensor
-    if category == "Sensor Data":
-        sensor_dfs = extract_sensor_timestamps(raw_lines)
-        if not sensor_dfs:
-            doc.add_paragraph("No sensor timestamps found.\n")
-        else:
-            for sensor_id, (sensor_name, df) in sensor_dfs.items():
-                title = f"{sensor_name} ({sensor_id})"
-                add_dataframe_to_doc(doc, df, title=title)
-
-
 # --- Configuration ---
 
 log_files = {
@@ -293,12 +259,11 @@ def extract_sensor_data(log_text):
     return sensors
 
 
-def parse_bluetooth_log(doc, filepath):
+def parse_bluetooth_log(doc, text):
     """Extracts Bluetooth connection and bonded device info."""
-    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read()
 
     # 1️⃣ Connection / Disconnection events
+    print(text)
     dates = re.findall(r"(\d{2}-\d{2})\s\d{2}:\d{2}:\d{2}\.\d{3}", text)
 
     print(dates)
@@ -556,56 +521,115 @@ def parse_location_data(loc_path):
         print(f"✅ Parsed {len(df)} location entries.")
         print(df)
 
+log_files = {
+    "Account Information": "account_information.txt",
+    "Bluetooth Information": "bluetooth_information.txt",
+    "Device Properties": "device_properties.txt",
+    "Sensor Data": "sensor_data.txt",
+    "Ip information": "ip_address_information.txt"
+}
 
+column_headers = {
+    "Account Information": ["Field", "Value"],
+    "Bluetooth Information": ["Field", "Value"],
+    "Device Properties": ["Field", "Value"],
+    "Sensor Data": ["Timestamp", "Sensor Type", "Value"]
+}
 
-def main():
+# ----------------------------------------------------------------
+# Function that builds the forensic report and saves it
+# ----------------------------------------------------------------
+log_files = {
+    "Account Information": "account_information.txt",
+    "Bluetooth Information": "bluetooth_information.txt",
+    "Device Properties": "device_properties.txt",
+    "Sensor Data": "sensor_data.txt",
+    "Ip information": "ip_address_information.txt",
+    "WiFi Information": "wifi_information.txt",
+    "Location Information": "dumpsys_location.txt"
+}
+
+# ---------------- Forensic Report Generation ----------------
+def generate_forensic_report(output_dir="downloads"):
+    """Generates the forensic .docx report using MongoDB data."""
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "Forensic_Log_Report.docx")
+
     doc = docx.Document()
     doc.add_paragraph("Forensic Log Report", style='Title')
-    output_filename = "Forensic_Log_Report.docx"
-
-    directory = "./"
-
-    with open(log_files["Account Information"], "r", encoding="utf-8") as f:
-        acc_text = f.read()
     
+    
+    # --- Account Info ---
+    acc_text = get_file_from_mongo(log_files["Account Information"])
     acc_df, service_df = parse_account_info(acc_text)
     add_dataframe_to_doc(doc, acc_df, "Account Information")
     add_dataframe_to_doc(doc, service_df, "Service Information")
 
-    with open("wifi_information.txt", "r", encoding="utf-8") as f:
-        wifi_data = f.read()
-
-    wifi_df = parse_wifi_log_extended(wifi_data)
-    for section_name, df in wifi_df.items():
+    # --- Wi-Fi Info ---
+    wifi_text = get_file_from_mongo(log_files["WiFi Information"])
+    wifi_df_dict = parse_wifi_log_extended(wifi_text)
+    for section_name, df in wifi_df_dict.items():
         add_dataframe_to_doc(doc, df, f"Wi-Fi: {section_name.replace('_', ' ').title()}")
-        print(df)
 
-    df_bonded = parse_bluetooth_log(doc, "bluetooth_information.txt")
+    # --- Bluetooth Info ---
+    bt_text = get_file_from_mongo(log_files["Bluetooth Information"])
+    df_bonded = parse_bluetooth_log(doc, bt_text)
     add_dataframe_to_doc(doc, df_bonded, "Bonded Bluetooth Devices")
 
-    loc_df = get_location('dumpsys_location.txt')
+    # --- Location Info ---
+    loc_text = get_file_from_mongo(log_files["Location Information"])
+    loc_df = get_location_text(loc_text)
     add_dataframe_to_doc(doc, loc_df, "Location Information")
 
-    with open(log_files['Sensor Data'], "r", encoding="utf-8") as f:
-        sensor_text = f.read()
-
+    # --- Sensor Data ---
+    sensor_text = get_file_from_mongo(log_files["Sensor Data"])
     sensor_dataframes = extract_sensor_data(sensor_text)
-
     for sensor_name, df in sensor_dataframes.items():
-        print(f"\n=== {sensor_name} ===")
         add_dataframe_to_doc(doc, df, sensor_name)
-        print(df)
 
-    with open(log_files["Ip information"],'r', encoding="utf-8") as f:
-        ip_text = f.read()
+    # --- IP Info ---
+    ip_text = get_file_from_mongo(log_files["Ip information"])
+    ip_df = extract_ip_info(ip_text)
+    add_dataframe_to_doc(doc, ip_df, "IP Address Information")
 
-    ip_dataframe = extract_ip_info(ip_text)
-    add_dataframe_to_doc(doc,ip_dataframe,"IP Address Information")
+    # Save to DOCX
+    doc.save(output_path)
+    print(f"Forensic report saved to: {output_path}")
+    return output_path
 
-    print(ip_dataframe)
-    doc.save(output_filename)
-    print(f"Forensic log report generated: {output_filename}")
+# ---------------- Flask Route ----------------
+@app.get("/download_report")
+def download_report():
+    report_path = "downloads/Preliminary_Forensic_Report.docx"
+    if os.path.exists(report_path):
+        return FileResponse(
+            path=report_path,
+            filename="Preliminary_Forensic_report.docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    return {"error": "Report not found"}
 
 
+# ---------------- Helper for location text ----------------
+def get_location_text(location_text):
+    """Parse location text from MongoDB (previously from file)."""
+    regex = re.compile(
+        r'Location\[(?:provider=)?(?P<provider>[\w\-]+)?\s*'
+        r'(?P<lat>-?\d+\.\d+)[, ]+(?P<lon>-?\d+\.\d+).*?'
+        r'(?:hAcc=(?P<acc>\d+\.?\d*))?',
+        re.IGNORECASE | re.DOTALL
+    )
+    matches = list(regex.finditer(location_text))
+    records = []
+    for m in matches:
+        records.append({
+            "provider": m.group("provider") or "unknown",
+            "latitude": float(m.group("lat")),
+            "longitude": float(m.group("lon")),
+            "accuracy": float(m.group("acc")) if m.group("acc") else None
+        })
+    return pd.DataFrame(records)
+
+# ---------------- Main ----------------
 if __name__ == "__main__":
-    main()
+    generate_forensic_report()

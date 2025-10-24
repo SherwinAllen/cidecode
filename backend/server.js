@@ -10,50 +10,62 @@ app.use(cors());
 app.use(express.json());
 
 // Simple GET endpoint used previously by SmartWatch flows
-app.get('/api/packet-report', (req, res) => {
-  const { email, password, source } = req.query;
-  console.log('Received email:', email);
-  console.log('Received password:', password);
+app.get('/api/packet-report', async (req, res) => {
+  const { source } = req.query;
   console.log('Request came from:', source);
-  
+
   if (source === 'SmartWatch') {
-    console.log('Source is SmartWatch');
+    try {
+      const script1 = path.join(__dirname, 'samsung_adb.py');
+      const script2 = path.join(__dirname, 'report_gen.py');
 
-    // Define the paths to the Python scripts.
-    const script1 = path.join(__dirname, 'samsung_adb.py');
-    const script2 = path.join(__dirname,'report_gen.py');
-    const script3 = path.join(__dirname,'generateTimeline.py');
+      console.log("Executing Python scripts for SmartWatch...");
+      
+      // Run the scripts sequentially
+      await new Promise((resolve, reject) => {
+        exec(
+          'python "C:\\Users\\shamb\\OneDrive\\Documents\\CIDECODE\\cidecode\\backend\\samsung_adb.py" && python "C:\\Users\\shamb\\OneDrive\\Documents\\CIDECODE\\cidecode\\backend\\report_gen.py" && python "C:\\Users\\shamb\\OneDrive\\Documents\\CIDECODE\\logcat_llm_test.py"',
+          { maxBuffer: 1024 * 1024 * 50 },
+          (error, stdout, stderr) => {
+            if (error) {
+              console.error(`❌ Error generating SmartWatch report: ${error}`);
+              return reject(error);
+            }
 
-    console.log("Script path is:",script1)
-    // Execute all three Python scripts sequentially.
-    exec(`python "${script1}" && python "${script2}" && python "${script3}"`, (err, stdout, stderr) => {
-      if (err) {
-        console.error('Error executing Python scripts:', err);
-        res.status(500).send('Error generating DOCX file');
-        return;
-      }
-      console.log('Python scripts output:', stdout);
-      if (stderr) console.error('Python scripts stderr:', stderr);
-
-      // Once the Python scripts complete, hash the DOCX file.
-      const docxPath = path.join(__dirname, '..', 'Forensic_Log_Report.docx');
-      const hashScript = path.join(__dirname, 'hash.py');
-      exec(`python "${hashScript}" "${docxPath}"`, (hashErr, hashStdout, hashStderr) => {
-        if (hashErr) {
-          console.error('Error computing hash for DOCX file:', hashErr);
-        } else {
-          console.log('Hash for DOCX file:', (hashStdout || '').toString().trim());
-        }
-        // Now send the DOCX file.
-        res.sendFile(docxPath, (sendErr) => {
-          if (sendErr) {
-            console.error('Error sending DOCX file:', sendErr);
-            res.status(500).send('Error sending DOCX file');
+            console.log("✅ Report generated successfully!");
+            console.log(stdout);
+            resolve(); 
           }
-        });
+        );
       });
-    });
+      // Path to the generated DOCX
+      const docxPath = path.join(__dirname, '..', 'Forensic_Log_Report.docx');
+
+      // ✅ Read artifacts from JSON file instead of .txt
+      const jsonPath = path.join(__dirname,  "..", 'packet_report.json');
+      let artifacts = {};
+
+      if (fs.existsSync(jsonPath)) {
+        jsonData = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+        artifacts = jsonData.artifacts || {};  // Ensure your package.json has an "artifacts" key
+      }
+
+      console.log("Artifacts loaded:", Object.keys(artifacts));
+
+      // ✅ Return JSON (not a blob)
+      res.json({
+        success: true,
+        docxFileName: 'Forensic_Log_Report.docx',
+        downloadUrl: '/api/download/Forensic_Log_Report.docx',
+        artifacts
+      });
+
+    } catch (err) {
+      console.error('Error generating SmartWatch report:', err);
+      res.status(500).json({ error: 'Failed to generate SmartWatch report', details: err.message });
+    }
   } else {
+    // You can keep your existing SmartAssistant / fallback JSON logic
     console.log('Source is neither SmartWatch nor SmartAssistant');
     const jsonPath = path.join(__dirname, 'packet_report.json');
     res.sendFile(jsonPath, (err) => {
@@ -65,10 +77,21 @@ app.get('/api/packet-report', (req, res) => {
   }
 });
 
-// In-memory store for live SmartAssistant requests
-const requests = {}; // requestId -> { status, step, method, message, otp, filePath, done, error, userConfirmed2FA }
+app.get('/api/download/:fileName', (req, res) => {
+  const fileName = req.params.fileName;
+  const filePath = path.join(__dirname, '..', fileName);
 
-// POST entrypoint from frontend SmartAssistant to start headless pipeline
+  if (!fs.existsSync(filePath)) {
+    console.error("File not found:", filePath);
+    return res.status(404).send('File not found');
+  }
+
+  res.download(filePath);
+});
+
+
+const requests = {};
+
 app.post('/api/packet-report', (req, res) => {
   const { email, password, source } = req.body;
   console.log('Received email:', email);
@@ -148,7 +171,7 @@ app.post('/api/packet-report', (req, res) => {
             console.error(`[${requestId}] sync error:`, err);
             return reject(err);
           }
-          console.log(`[${requestId}] SyncAudioTranscripts stdout:`, stdout);d
+          console.log(`[${requestId}] SyncAudioTranscripts stdout:`, stdout);
           if (stderr) console.error(`[${requestId}] SyncAudioTranscripts stderr:`, stderr);
           resolve();
         });
