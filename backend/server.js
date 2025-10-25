@@ -702,7 +702,7 @@ app.post('/api/internal/2fa-update/:id', (req, res) => {
   if (currentUrl) {
     info.currentUrl = currentUrl;
   }
-  console.log(`[${id}] 2FA update from headless script:`, method, message, currentUrl, errorType, showOtpModal);
+  console.log(`[${id}] 2FA update from script:`, method, message, currentUrl, errorType, showOtpModal);
   res.json({ ok: true });
 });
 

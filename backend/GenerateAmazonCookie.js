@@ -319,76 +319,6 @@ async function isIncorrectPasswordError(page) {
   }
 }
 
-// IMPROVED: Function to detect OTP verification failure - MORE ACCURATE
-async function isOtpVerificationFailed(page) {
-  try {
-    // FIRST check if we're on target page - if yes, then OTP was successful
-    if (await isOnTargetPage(page)) {
-      return false; // SUCCESS - not a failure
-    }
-    
-    // Only check for OTP errors if we're actually on an OTP page
-    const onOtpPage = await isOn2FAPage(page);
-    if (!onOtpPage) {
-      return false; // If we're not on OTP page, can't have OTP failure
-    }
-    
-    const errorSelectors = [
-      "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'the code you entered is not valid')]",
-      "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'incorrect code')]",
-      "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'wrong code')]",
-      "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'invalid code')]",
-      '.a-box-inner.a-alert-container',
-      '.a-alert-content',
-      '.a-list-item'
-    ];
-    
-    for (const selector of errorSelectors) {
-      try {
-        if (selector.startsWith('//')) {
-          const elements = await page.$x(selector);
-          for (const element of elements) {
-            const text = await page.evaluate(el => el.textContent, element);
-            if (text && (text.toLowerCase().includes('code you entered is not valid') || 
-                text.toLowerCase().includes('incorrect code') ||
-                text.toLowerCase().includes('wrong code'))) {
-              console.log('🔴 Detected OTP verification failure');
-              return true;
-            }
-          }
-        } else {
-          const elements = await page.$$(selector);
-          for (const element of elements) {
-            const text = await page.evaluate(el => el.textContent, element);
-            if (text && (text.toLowerCase().includes('code you entered is not valid') || 
-                text.toLowerCase().includes('incorrect code') ||
-                text.toLowerCase().includes('wrong code'))) {
-              console.log('🔴 Detected OTP verification failure');
-              return true;
-            }
-          }
-        }
-      } catch (error) {
-        continue;
-      }
-    }
-    
-    // Also check page source as fallback
-    const pageSource = await page.content();
-    if (pageSource.toLowerCase().includes('code you entered is not valid') || 
-        pageSource.toLowerCase().includes('incorrect code') ||
-        pageSource.toLowerCase().includes('wrong code')) {
-      console.log('🔴 Detected OTP verification failure in page source');
-      return true;
-    }
-    
-    return false;
-  } catch (error) {
-    console.warn('Error checking for OTP verification failure:', error.message);
-    return false;
-  }
-}
-
 // NEW: Function to detect and handle authentication errors - IMPROVED
 async function checkForAuthErrors(page, context = 'general') {
   console.log(`🔍 Checking for authentication errors (context: ${context})...`);
@@ -412,15 +342,6 @@ async function checkForAuthErrors(page, context = 'general') {
     console.log('❌ UNKNOWN 2FA PAGE: Unsupported authentication method detected');
     console.log('   This account requires additional verification that cannot be automated');
     return 'UNKNOWN_2FA_PAGE';
-  }
-  
-  // Only check for OTP errors if we're specifically in OTP context AND not on target page
-  if (context === 'otp' && !await isOnTargetPage(page)) {
-    // Check for OTP verification failure
-    if (await isOtpVerificationFailed(page)) {
-      console.log('❌ OTP VERIFICATION FAILED: Incorrect OTP entered');
-      return 'OTP_VERIFICATION_FAILED';
-    }
   }
   
   return null;
@@ -684,7 +605,7 @@ async function waitForRedirectAfter2FA(page, timeout = 180000) {
   }
 }
 
-// IMPROVED: Handle OTP submission and verification with proper state tracking
+// NEW IMPROVED: Handle OTP submission and verification with REDIRECTION-BASED validation
 async function fillOtpAndSubmit(page, otp) {
   try {
     console.log('Attempting to auto-fill OTP (masked) ...');
@@ -726,6 +647,9 @@ async function fillOtpAndSubmit(page, otp) {
     }
 
     if (filled) {
+      // Get current URL before submission to detect redirection
+      const urlBeforeSubmit = page.url();
+      
       // small pause to allow page to react to typed input
       await sleep(400);
 
@@ -758,12 +682,21 @@ async function fillOtpAndSubmit(page, otp) {
       if (clicked) {
         console.log('OTP auto-submitted.');
         
-        // IMPROVED OTP VERIFICATION LOGIC:
-        // Wait for page to process the OTP
-        await sleep(3000);
+        // Wait for page to process the OTP - allow time for redirection
+        await sleep(5000);
         
-        // STEP 1: FIRST check if we're on target page - this is the SUCCESS case
-        if (await isOnTargetPage(page)) {
+        // NEW LOGIC: Check current URL and page state after submission
+        const currentUrl = page.url();
+        const stillOnOtpPage = await isOn2FAPage(page);
+        const onTargetPage = await isOnTargetPage(page);
+        
+        console.log(`🔄 Post-submission state check:`);
+        console.log(`   - Still on OTP page: ${stillOnOtpPage}`);
+        console.log(`   - On target page: ${onTargetPage}`);
+        console.log(`   - URL changed: ${currentUrl !== urlBeforeSubmit}`);
+        
+        // SUCCESS CASE: We're on the target page
+        if (onTargetPage) {
           console.log('✅ OTP verification SUCCESSFUL - redirected to target page');
           
           // Clear any OTP error state on server since we succeeded
@@ -783,39 +716,34 @@ async function fillOtpAndSubmit(page, otp) {
           return true; // Return success
         }
         
-        // STEP 2: Check if we're still on OTP page (failure case)
-        const stillOnOtpPage = await isOn2FAPage(page);
-        
+        // FAILURE CASE: We're still on an OTP page (redirection back to OTP page indicates invalid OTP)
         if (stillOnOtpPage) {
-          // We're still on OTP page, check for specific OTP errors
-          const otpErrorDetected = await isOtpVerificationFailed(page);
+          console.log('❌ OTP verification FAILED - redirected back to OTP page');
           
-          if (otpErrorDetected) {
-            console.log('❌ OTP verification failed - incorrect code');
-            if (REQUEST_ID) {
-              try { 
-                await postJson(`/api/internal/2fa-update/${REQUEST_ID}`, { 
-                  errorType: 'INVALID_OTP',
-                  method: 'OTP (SMS/Voice)',
-                  message: 'Entered OTP was incorrect, please try again.',
-                  showOtpModal: true,
-                  otpError: 'The code you entered is not valid. Please check the code and try again.'
-                }); 
-              } catch(e){
-                console.error('Error notifying server of INVALID_OTP:', e);
-              }
-            }
-            throw new Error('INVALID_OTP');
-          } else {
-            // We're still on OTP page but no error shown - might be loading or in transition
-            console.log('🔄 OTP submitted, waiting for page transition...');
-            return false; // Let main flow handle redirection
+          // Additional check: If we're on a DIFFERENT OTP page than before, it's definitely a failure
+          if (currentUrl !== urlBeforeSubmit && currentUrl.includes('/ap/')) {
+            console.log('🔴 Confirmed OTP failure - redirected to different authentication page');
           }
-        } else {
-          // We're not on OTP page and not on target page - we're probably in transition
-          console.log('🔄 OTP submitted, page is transitioning...');
-          return false; // Let main flow handle redirection
+          
+          if (REQUEST_ID) {
+            try { 
+              await postJson(`/api/internal/2fa-update/${REQUEST_ID}`, { 
+                errorType: 'INVALID_OTP',
+                method: 'OTP (SMS/Voice)',
+                message: 'Entered OTP was incorrect, please try again.',
+                showOtpModal: true,
+                otpError: 'The code you entered is not valid. Please check the code and try again.'
+              }); 
+            } catch(e){
+              console.error('Error notifying server of INVALID_OTP:', e);
+            }
+          }
+          throw new Error('INVALID_OTP');
         }
+        
+        // TRANSITION CASE: We're not on OTP page and not on target page - might be in transition
+        console.log('🔄 OTP submitted, page is transitioning...');
+        return false; // Let main flow handle redirection
       } else {
         console.warn('OTP filled but submit action failed.');
       }
@@ -1177,9 +1105,14 @@ function setupSignalHandlers(browser) {
   
   try {
     // Launch Puppeteer with optimized settings for server environments
+
+    const headless = process.env.HEADLESS
+      ? process.env.HEADLESS.toLowerCase() === 'true'
+      : true;
+
     console.log('🔄 Launching Puppeteer...');
     browser = await puppeteer.launch({
-      headless: process.env.NODE_ENV === 'production' || process.env.HEADLESS === 'true',
+      headless,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -1378,6 +1311,6 @@ function setupSignalHandlers(browser) {
         console.warn('⚠️ Error closing browser session:', quitError.message);
       }
     }
-    console.log('=== HEADLESS SESSION COMPLETED ===');
+    console.log('=== SESSION COMPLETED ===');
   }
 })();
