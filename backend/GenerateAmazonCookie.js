@@ -1,9 +1,9 @@
-const { Builder, By, until } = require('selenium-webdriver');
-const chrome = require('selenium-webdriver/chrome');
+const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
+const readline = require('readline');
 require('dotenv').config({ 
   path: path.resolve(__dirname, '.env'),
   quiet: true
@@ -30,29 +30,182 @@ const activityUrl = 'https://www.amazon.in/alexa-privacy/apd/rvh';
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// NEW: Check if we're running in manual mode (no frontend pipeline)
+const isManualMode = !process.env.REQUEST_ID;
+
+// NEW: Function to get manual OTP input from user
+function getManualOtp() {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+    
+    rl.question('🔢 Enter OTP code manually (or press Enter to skip and wait for auto-redirect): ', (otp) => {
+      rl.close();
+      resolve(otp.trim());
+    });
+  });
+}
+
+// NEW: Function to handle manual OTP mode
+async function handleManualOtpMode(page) {
+  if (!isManualMode) return null;
+  
+  console.log('\n🔧 MANUAL MODE: Running without frontend pipeline');
+  console.log('📝 You can manually enter OTP or wait for auto-redirect');
+  
+  const otp = await getManualOtp();
+  
+  if (otp && otp.length === 6 && /^\d{6}$/.test(otp)) {
+    console.log(`🔄 Attempting to submit manual OTP: ${otp.replace(/\d/g, '*')}`);
+    try {
+      const success = await fillOtpAndSubmit(page, otp);
+      if (success) {
+        console.log('✅ Manual OTP submission successful!');
+        return true;
+      }
+    } catch (error) {
+      if (error.message === 'INVALID_OTP') {
+        console.log('❌ Manual OTP verification failed');
+        console.log('🔄 Please try again or wait for auto-redirect');
+        return false;
+      }
+      throw error;
+    }
+  } else if (otp) {
+    console.log('❌ Invalid OTP format. Please enter exactly 6 digits.');
+    return false;
+  } else {
+    console.log('⏳ Skipping manual OTP, waiting for auto-redirect...');
+    return null;
+  }
+}
+
+// NEW: Enhanced OTP handling with manual mode support
+async function handleOtpAuthentication(page, context = 'full_auth') {
+  console.log(`🔐 Handling OTP authentication (${context})...`);
+  
+  let attempts = 0;
+  const maxOtpAttempts = isManualMode ? 10 : 4; // More attempts in manual mode
+  
+  const start = Date.now();
+  
+  while (Date.now() - start < 10 * 60 * 1000 && attempts < maxOtpAttempts) { // 10 min timeout
+    await sleep(2000);
+    
+    // NEW: Check for manual mode first
+    if (isManualMode) {
+      const manualResult = await handleManualOtpMode(page);
+      if (manualResult === true) {
+        console.log('✅ Manual OTP authentication completed');
+        break;
+      } else if (manualResult === false) {
+        attempts++;
+        continue; // Try again after failed manual attempt
+      }
+      // If manualResult is null, user skipped manual input, continue with auto logic
+    }
+    
+    // Original automated OTP logic for pipeline mode
+    if (!isManualMode) {
+      try {
+        const resp = await getJson(`/api/internal/get-otp/${REQUEST_ID}`);
+        if (resp && resp.otp) { 
+          const otp = resp.otp;
+          attempts++;
+          console.log(`🔄 Attempting OTP verification (attempt ${attempts}/${maxOtpAttempts})`);
+          
+          try {
+            const otpSuccess = await fillOtpAndSubmit(page, otp);
+            
+            if (otpSuccess || await isOnTargetPage(page)) {
+              console.log('✅ OTP authentication completed successfully');
+              break;
+            }
+            
+            await sleep(3000);
+            
+            if (await isOnTargetPage(page)) {
+              console.log('✅ OTP authentication completed successfully after wait');
+              break;
+            }
+            
+          } catch (otpErr) {
+            if (otpErr.message === 'INVALID_OTP' && attempts < maxOtpAttempts) {
+              console.log(`❌ OTP attempt ${attempts} failed, waiting for new OTP...`);
+              if (REQUEST_ID) {
+                try { 
+                  await postJson(`/api/internal/clear-otp/${REQUEST_ID}`); 
+                } catch(e){}
+              }
+              continue;
+            } else {
+              throw otpErr;
+            }
+          }
+        }
+        if (resp && resp.userConfirmed2FA) break;
+      } catch (e) {
+        // Continue polling in case of network errors
+      }
+    }
+    
+    // NEW: In manual mode, check if we've been redirected automatically
+    if (isManualMode && await isOnTargetPage(page)) {
+      console.log('✅ Automatic redirection detected! OTP no longer needed.');
+      break;
+    }
+    
+    // NEW: In manual mode, check if we're no longer on OTP page (user might have manually completed)
+    if (isManualMode && !await isOn2FAPage(page) && !await isOnTargetPage(page)) {
+      console.log('🔄 No longer on OTP page, checking authentication status...');
+      // Wait a bit more to see if we get redirected
+      await sleep(5000);
+      if (await isOnTargetPage(page)) {
+        console.log('✅ Manual authentication completed successfully!');
+        break;
+      }
+    }
+  }
+  
+  if (attempts >= maxOtpAttempts) {
+    throw new Error('Maximum OTP attempts exceeded');
+  }
+  
+  // Only wait for redirect if we're not already on target page
+  if (!await isOnTargetPage(page)) {
+    console.log('🔄 Waiting for final redirection after OTP...');
+    const success = await waitForRedirectAfter2FA(page);
+    if (!success) {
+      throw new Error('Failed to complete OTP redirection');
+    }
+  }
+}
+
 // NEW: Function to detect unknown 2FA page (not OTP or Push)
-async function isUnknown2FAPage(driver) {
+async function isUnknown2FAPage(page) {
   try {
     console.log('🔍 Checking for unknown 2FA page...');
     
     // If we're on target page, it's not unknown
-    if (await isOnTargetPage(driver)) {
+    if (await isOnTargetPage(page)) {
       return false;
     }
     
     // If we're on known 2FA pages (OTP or Push), it's not unknown
-    if (await isOn2FAPage(driver)) {
-      const method = await detect2FAMethod(driver);
+    if (await isOn2FAPage(page)) {
+      const method = await detect2FAMethod(page);
       if (method === 'OTP (SMS/Voice)' || method === 'Push Notification') {
         return false;
       }
     }
     
     // Check if we're on any Amazon authentication page that's not the target page
-    const currentUrl = await driver.getCurrentUrl();
+    const currentUrl = page.url();
     if (currentUrl.includes('/ap/') && 
         !currentUrl.includes('/alexa-privacy/apd/') &&
-        !await isOnTargetPage(driver)) {
+        !await isOnTargetPage(page)) {
       console.log('🔴 Detected unknown 2FA/Auth page:', currentUrl);
       return true;
     }
@@ -65,7 +218,7 @@ async function isUnknown2FAPage(driver) {
 }
 
 // NEW: Function to detect invalid email error
-async function isInvalidEmailError(driver) {
+async function isInvalidEmailError(page) {
   try {
     const errorSelectors = [
       "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'we cannot find an account with that email')]",
@@ -79,18 +232,18 @@ async function isInvalidEmailError(driver) {
     for (const selector of errorSelectors) {
       try {
         if (selector.startsWith('//')) {
-          const elements = await driver.findElements(By.xpath(selector));
+          const elements = await page.$x(selector);
           for (const element of elements) {
-            const text = await element.getText();
+            const text = await page.evaluate(el => el.textContent, element);
             if (text && text.toLowerCase().includes('cannot find an account') || 
                 text.toLowerCase().includes('no account found')) {
               return true;
             }
           }
         } else {
-          const elements = await driver.findElements(By.css(selector));
+          const elements = await page.$$(selector);
           for (const element of elements) {
-            const text = await element.getText();
+            const text = await page.evaluate(el => el.textContent, element);
             if (text && text.toLowerCase().includes('cannot find an account') || 
                 text.toLowerCase().includes('no account found')) {
               return true;
@@ -103,7 +256,7 @@ async function isInvalidEmailError(driver) {
     }
     
     // Also check page source as fallback
-    const pageSource = await driver.getPageSource();
+    const pageSource = await page.content();
     if (pageSource.toLowerCase().includes('cannot find an account') || 
         pageSource.toLowerCase().includes('no account found')) {
       return true;
@@ -116,7 +269,7 @@ async function isInvalidEmailError(driver) {
 }
 
 // NEW: Function to detect incorrect password error
-async function isIncorrectPasswordError(driver) {
+async function isIncorrectPasswordError(page) {
   try {
     const errorSelectors = [
       "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'your password is incorrect')]",
@@ -130,18 +283,18 @@ async function isIncorrectPasswordError(driver) {
     for (const selector of errorSelectors) {
       try {
         if (selector.startsWith('//')) {
-          const elements = await driver.findElements(By.xpath(selector));
+          const elements = await page.$x(selector);
           for (const element of elements) {
-            const text = await element.getText();
+            const text = await page.evaluate(el => el.textContent, element);
             if (text && (text.toLowerCase().includes('password is incorrect') || 
                 text.toLowerCase().includes('incorrect password'))) {
               return true;
             }
           }
         } else {
-          const elements = await driver.findElements(By.css(selector));
+          const elements = await page.$$(selector);
           for (const element of elements) {
-            const text = await element.getText();
+            const text = await page.evaluate(el => el.textContent, element);
             if (text && (text.toLowerCase().includes('password is incorrect') || 
                 text.toLowerCase().includes('incorrect password'))) {
               return true;
@@ -154,7 +307,7 @@ async function isIncorrectPasswordError(driver) {
     }
     
     // Also check page source as fallback
-    const pageSource = await driver.getPageSource();
+    const pageSource = await page.content();
     if (pageSource.toLowerCase().includes('password is incorrect') || 
         pageSource.toLowerCase().includes('incorrect password')) {
       return true;
@@ -167,15 +320,15 @@ async function isIncorrectPasswordError(driver) {
 }
 
 // IMPROVED: Function to detect OTP verification failure - MORE ACCURATE
-async function isOtpVerificationFailed(driver) {
+async function isOtpVerificationFailed(page) {
   try {
     // FIRST check if we're on target page - if yes, then OTP was successful
-    if (await isOnTargetPage(driver)) {
+    if (await isOnTargetPage(page)) {
       return false; // SUCCESS - not a failure
     }
     
     // Only check for OTP errors if we're actually on an OTP page
-    const onOtpPage = await isOn2FAPage(driver);
+    const onOtpPage = await isOn2FAPage(page);
     if (!onOtpPage) {
       return false; // If we're not on OTP page, can't have OTP failure
     }
@@ -193,9 +346,9 @@ async function isOtpVerificationFailed(driver) {
     for (const selector of errorSelectors) {
       try {
         if (selector.startsWith('//')) {
-          const elements = await driver.findElements(By.xpath(selector));
+          const elements = await page.$x(selector);
           for (const element of elements) {
-            const text = await element.getText();
+            const text = await page.evaluate(el => el.textContent, element);
             if (text && (text.toLowerCase().includes('code you entered is not valid') || 
                 text.toLowerCase().includes('incorrect code') ||
                 text.toLowerCase().includes('wrong code'))) {
@@ -204,9 +357,9 @@ async function isOtpVerificationFailed(driver) {
             }
           }
         } else {
-          const elements = await driver.findElements(By.css(selector));
+          const elements = await page.$$(selector);
           for (const element of elements) {
-            const text = await element.getText();
+            const text = await page.evaluate(el => el.textContent, element);
             if (text && (text.toLowerCase().includes('code you entered is not valid') || 
                 text.toLowerCase().includes('incorrect code') ||
                 text.toLowerCase().includes('wrong code'))) {
@@ -221,7 +374,7 @@ async function isOtpVerificationFailed(driver) {
     }
     
     // Also check page source as fallback
-    const pageSource = await driver.getPageSource();
+    const pageSource = await page.content();
     if (pageSource.toLowerCase().includes('code you entered is not valid') || 
         pageSource.toLowerCase().includes('incorrect code') ||
         pageSource.toLowerCase().includes('wrong code')) {
@@ -237,34 +390,34 @@ async function isOtpVerificationFailed(driver) {
 }
 
 // NEW: Function to detect and handle authentication errors - IMPROVED
-async function checkForAuthErrors(driver, context = 'general') {
+async function checkForAuthErrors(page, context = 'general') {
   console.log(`🔍 Checking for authentication errors (context: ${context})...`);
   
   // Check for invalid email error
-  if (await isInvalidEmailError(driver)) {
+  if (await isInvalidEmailError(page)) {
     console.log('❌ AUTHENTICATION ERROR: Invalid email address');
     console.log(`   The email "${AMAZON_EMAIL}" is not associated with an Amazon account`);
     return 'INVALID_EMAIL';
   }
   
   // Check for incorrect password error
-  if (await isIncorrectPasswordError(driver)) {
+  if (await isIncorrectPasswordError(page)) {
     console.log('❌ AUTHENTICATION ERROR: Incorrect password');
     console.log('   The password provided does not match the email address');
     return 'INCORRECT_PASSWORD';
   }
   
   // NEW: Check for unknown 2FA page
-  if (await isUnknown2FAPage(driver)) {
+  if (await isUnknown2FAPage(page)) {
     console.log('❌ UNKNOWN 2FA PAGE: Unsupported authentication method detected');
     console.log('   This account requires additional verification that cannot be automated');
     return 'UNKNOWN_2FA_PAGE';
   }
   
   // Only check for OTP errors if we're specifically in OTP context AND not on target page
-  if (context === 'otp' && !await isOnTargetPage(driver)) {
+  if (context === 'otp' && !await isOnTargetPage(page)) {
     // Check for OTP verification failure
-    if (await isOtpVerificationFailed(driver)) {
+    if (await isOtpVerificationFailed(page)) {
       console.log('❌ OTP VERIFICATION FAILED: Incorrect OTP entered');
       return 'OTP_VERIFICATION_FAILED';
     }
@@ -274,9 +427,9 @@ async function checkForAuthErrors(driver, context = 'general') {
 }
 
 // Check if we're on target page
-async function isOnTargetPage(driver) {
+async function isOnTargetPage(page) {
   try {
-    const currentUrl = await driver.getCurrentUrl();
+    const currentUrl = page.url();
     return currentUrl.includes('/alexa-privacy/apd/');
   } catch (error) {
     return false;
@@ -284,10 +437,10 @@ async function isOnTargetPage(driver) {
 }
 
 // Enhanced function to detect push notification page
-async function isOnPushNotificationPage(driver) {
+async function isOnPushNotificationPage(page) {
   try {
-    const currentUrl = await driver.getCurrentUrl();
-    const pageSource = await driver.getPageSource();
+    const currentUrl = page.url();
+    const pageSource = await page.content();
     
     // Check for push notification page indicators
     const pushIndicators = [
@@ -303,7 +456,7 @@ async function isOnPushNotificationPage(driver) {
     for (const indicator of pushIndicators) {
       if (typeof indicator === 'string' && indicator.startsWith('//')) {
         try {
-          const elements = await driver.findElements(By.xpath(indicator));
+          const elements = await page.$x(indicator);
           if (elements.length > 0) return true;
         } catch (e) {}
       } else if (indicator === true) {
@@ -318,12 +471,12 @@ async function isOnPushNotificationPage(driver) {
 }
 
 // Enhanced 2FA method detection
-async function detect2FAMethod(driver) {
+async function detect2FAMethod(page) {
   try {
     console.log('🔍 Detecting 2FA method...');
     
-    const currentUrl = await driver.getCurrentUrl();
-    const pageSource = await driver.getPageSource();
+    const currentUrl = page.url();
+    const pageSource = await page.content();
     
     // Check for OTP FIRST
     const otpIndicators = [
@@ -348,13 +501,13 @@ async function detect2FAMethod(driver) {
     for (const indicator of otpIndicators) {
       try {
         if (indicator.startsWith('//')) {
-          const elements = await driver.findElements(By.xpath(indicator));
+          const elements = await page.$x(indicator);
           if (elements.length > 0) {
             console.log('✅ Detected OTP 2FA method');
             return 'OTP (SMS/Voice)';
           }
         } else {
-          const elements = await driver.findElements(By.css(indicator));
+          const elements = await page.$$(indicator);
           if (elements.length > 0) {
             console.log('✅ Detected OTP 2FA method');
             return 'OTP (SMS/Voice)';
@@ -366,7 +519,7 @@ async function detect2FAMethod(driver) {
     }
     
     // Only AFTER checking OTP, check for push notification
-    if (await isOnPushNotificationPage(driver)) {
+    if (await isOnPushNotificationPage(page)) {
       console.log('✅ Detected Push Notification 2FA method');
       return 'Push Notification';
     }
@@ -379,7 +532,7 @@ async function detect2FAMethod(driver) {
 }
 
 // Function to check if we're on any kind of 2FA page
-async function isOn2FAPage(driver) {
+async function isOn2FAPage(page) {
   try {
     // Check for OTP input fields FIRST
     const otpInputSelectors = [
@@ -391,18 +544,18 @@ async function isOn2FAPage(driver) {
     ];
     
     for (const sel of otpInputSelectors) {
-      const elements = await driver.findElements(By.css(sel));
+      const elements = await page.$$(sel);
       if (elements.length > 0) {
         return true;
       }
     }
     
     // Only AFTER checking OTP, check for push notification page
-    if (await isOnPushNotificationPage(driver)) {
+    if (await isOnPushNotificationPage(page)) {
       return true;
     }
     
-    const currentUrl = await driver.getCurrentUrl();
+    const currentUrl = page.url();
     
     // Check for 2FA text indicators
     const otpIndicators = [
@@ -414,7 +567,7 @@ async function isOn2FAPage(driver) {
     
     for (const xpath of otpIndicators) {
       try {
-        const elements = await driver.findElements(By.xpath(xpath));
+        const elements = await page.$x(xpath);
         if (elements.length > 0) {
           return true;
         }
@@ -432,7 +585,7 @@ async function isOn2FAPage(driver) {
 }
 
 // Enhanced wait function with better push notification handling and cleanup
-async function waitForRedirectAfter2FA(driver, timeout = 180000) {
+async function waitForRedirectAfter2FA(page, timeout = 180000) {
   console.log('⏳ Waiting for automatic redirection to activity page after 2FA...');
   
   const startTime = Date.now();
@@ -442,25 +595,25 @@ async function waitForRedirectAfter2FA(driver, timeout = 180000) {
   try {
     while (Date.now() - startTime < timeout) {
       try {
-        const currentUrl = await driver.getCurrentUrl();
+        const currentUrl = page.url();
         
         // Check if we're on target page
-        if (await isOnTargetPage(driver)) {
+        if (await isOnTargetPage(page)) {
           console.log('✅ Automatic redirection detected! Now on target page.');
           return true;
         }
         
         // Check if we're on push notification page
-        const onPushPage = await isOnPushNotificationPage(driver);
+        const onPushPage = await isOnPushNotificationPage(page);
         if (onPushPage) {
           wasOnPushPage = true;
         }
         
         // Check if we're on any 2FA page
-        const on2FAPage = await isOn2FAPage(driver);
+        const on2FAPage = await isOn2FAPage(page);
         
         // Check if we're back on login page (error condition) - push notification failure
-        const onLoginPage = await needsFullLogin(driver);
+        const onLoginPage = await needsFullLogin(page);
         
         // NEW: Detect push notification failure - THROW ERROR INSTEAD OF RETURNING
         if (wasOnPushPage && onLoginPage && !on2FAPage && !onPushPage) {
@@ -532,7 +685,7 @@ async function waitForRedirectAfter2FA(driver, timeout = 180000) {
 }
 
 // IMPROVED: Handle OTP submission and verification with proper state tracking
-async function fillOtpAndSubmit(driver, otp) {
+async function fillOtpAndSubmit(page, otp) {
   try {
     console.log('Attempting to auto-fill OTP (masked) ...');
     console.log(`OTP (masked): ${otp ? otp.replace(/\d/g, '*') : ''}`);
@@ -549,14 +702,12 @@ async function fillOtpAndSubmit(driver, otp) {
     ];
 
     let filled = false;
-    let inputEl = null;
     for (const sel of otpSelectors) {
       try {
-        const els = await driver.findElements(By.css(sel));
-        if (els.length > 0) {
-          inputEl = els[0];
-          await inputEl.clear().catch(()=>{});
-          await inputEl.sendKeys(otp);
+        const element = await page.$(sel);
+        if (element) {
+          await element.click({ clickCount: 3 }); // Select all text
+          await element.type(otp);
           filled = true;
           break;
         }
@@ -565,17 +716,16 @@ async function fillOtpAndSubmit(driver, otp) {
 
     if (!filled) {
       try {
-        const els = await driver.findElements(By.xpath("//input[@type='text' or @type='tel' or @type='number'][contains(translate(@placeholder,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'code') or contains(translate(@placeholder,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'otp')]"));
-        if (els.length > 0) {
-          inputEl = els[0];
-          await inputEl.clear().catch(()=>{});
-          await inputEl.sendKeys(otp);
+        const elements = await page.$$x("//input[@type='text' or @type='tel' or @type='number'][contains(translate(@placeholder,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'code') or contains(translate(@placeholder,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'otp')]");
+        if (elements.length > 0) {
+          await elements[0].click({ clickCount: 3 });
+          await elements[0].type(otp);
           filled = true;
         }
       } catch (e) {}
     }
 
-    if (filled && inputEl) {
+    if (filled) {
       // small pause to allow page to react to typed input
       await sleep(400);
 
@@ -589,27 +739,18 @@ async function fillOtpAndSubmit(driver, otp) {
       let clicked = false;
       for (const sel of submitSelectors) {
         try {
-          const els = await driver.findElements(By.css(sel));
-          if (els.length > 0) {
-            try { await driver.executeScript('arguments[0].scrollIntoView(true);', els[0]); } catch(e){}
-            try {
-              await els[0].click();
-              clicked = true;
-              break;
-            } catch (clickErr) {
-              try {
-                await driver.executeScript('arguments[0].click();', els[0]);
-                clicked = true;
-                break;
-              } catch (jsClickErr) {}
-            }
+          const element = await page.$(sel);
+          if (element) {
+            await element.click();
+            clicked = true;
+            break;
           }
         } catch (e) { /* ignore and try next */ }
       }
 
       if (!clicked) {
         try {
-          await driver.actions().sendKeys('\n').perform();
+          await page.keyboard.press('Enter');
           clicked = true;
         } catch (e) {}
       }
@@ -622,7 +763,7 @@ async function fillOtpAndSubmit(driver, otp) {
         await sleep(3000);
         
         // STEP 1: FIRST check if we're on target page - this is the SUCCESS case
-        if (await isOnTargetPage(driver)) {
+        if (await isOnTargetPage(page)) {
           console.log('✅ OTP verification SUCCESSFUL - redirected to target page');
           
           // Clear any OTP error state on server since we succeeded
@@ -643,11 +784,11 @@ async function fillOtpAndSubmit(driver, otp) {
         }
         
         // STEP 2: Check if we're still on OTP page (failure case)
-        const stillOnOtpPage = await isOn2FAPage(driver);
+        const stillOnOtpPage = await isOn2FAPage(page);
         
         if (stillOnOtpPage) {
           // We're still on OTP page, check for specific OTP errors
-          const otpErrorDetected = await isOtpVerificationFailed(driver);
+          const otpErrorDetected = await isOtpVerificationFailed(page);
           
           if (otpErrorDetected) {
             console.log('❌ OTP verification failed - incorrect code');
@@ -738,22 +879,15 @@ function getJson(pathname) {
 // read REQUEST_ID from env (set by server on spawn)
 const REQUEST_ID = process.env.REQUEST_ID || null;
 
-// Set Chrome options with Bluetooth and WebAuthn disabled
-const options = new chrome.Options();
-// options.addArguments('--headless=new');
-options.addArguments('--no-sandbox');
-options.addArguments('--disable-dev-shm-usage');
-options.addArguments('--disable-gpu');
-
 // Helper implementations
-async function needsFullLogin(driver) {
+async function needsFullLogin(page) {
   try {
     const emailSelectors = ['#ap_email', 'input[name="email"]', 'input[type="email"]', 'input#ap_email'];
     for (const sel of emailSelectors) {
-      const els = await driver.findElements(By.css(sel));
-      if (els.length > 0) return true;
+      const elements = await page.$$(sel);
+      if (elements.length > 0) return true;
     }
-    const url = await driver.getCurrentUrl();
+    const url = page.url();
     if (url.includes('/ap/signin') || url.includes('/ap/login')) return true;
     return false;
   } catch (e) {
@@ -761,16 +895,16 @@ async function needsFullLogin(driver) {
   }
 }
 
-async function isTrueReAuthScenario(driver) {
+async function isTrueReAuthScenario(page) {
   try {
     const passSelectors = ['#ap_password', 'input[name="password"]', 'input[type="password"]'];
     for (const sel of passSelectors) {
-      const els = await driver.findElements(By.css(sel));
-      if (els.length > 0) return true;
+      const elements = await page.$$(sel);
+      if (elements.length > 0) return true;
     }
-    const url = await driver.getCurrentUrl();
+    const url = page.url();
     if (url.includes('/ap/re-auth') || url.includes('/ap/mfa/')) return true;
-    const source = await driver.getPageSource();
+    const source = await page.content();
     if (source && /re-auth|reauth|verify it's you|verify your identity/i.test(source)) return true;
     return false;
   } catch (e) {
@@ -778,24 +912,34 @@ async function isTrueReAuthScenario(driver) {
   }
 }
 
-// Enhanced authentication functions with error handling
-async function performFullAuthentication(driver) {
+// Enhanced authentication functions with manual mode support
+async function performFullAuthentication(page) {
   try {
     console.log('performFullAuthentication: starting (masked credentials)');
+    if (isManualMode) {
+      console.log('🔧 MANUAL MODE: You may need to complete authentication steps in the browser');
+    }
     
     // try to fill email
     try {
-      const emailEls = await driver.findElements(By.css('#ap_email, input[name="email"], input[type="email"]'));
-      if (emailEls.length > 0) {
-        await emailEls[0].clear().catch(()=>{});
-        await emailEls[0].sendKeys(AMAZON_EMAIL);
-        // click continue if present
-        const cont = await driver.findElements(By.css('input#continue, button#continue, input[name="continue"]'));
-        if (cont.length > 0) { 
-          try { 
-            await cont[0].click(); 
-            await sleep(2000);
-          } catch(e){}
+      const emailSelectors = ['#ap_email', 'input[name="email"]', 'input[type="email"]'];
+      for (const sel of emailSelectors) {
+        const element = await page.$(sel);
+        if (element) {
+          await element.click({ clickCount: 3 });
+          await element.type(AMAZON_EMAIL);
+          
+          // click continue if present
+          const continueSelectors = ['input#continue', 'button#continue', 'input[name="continue"]'];
+          for (const contSel of continueSelectors) {
+            const contElement = await page.$(contSel);
+            if (contElement) {
+              await contElement.click();
+              await sleep(2000);
+              break;
+            }
+          }
+          break;
         }
       }
     } catch (e) { 
@@ -804,26 +948,31 @@ async function performFullAuthentication(driver) {
 
     // NEW: Check for invalid email error after submitting email
     await sleep(2000);
-    const emailError = await checkForAuthErrors(driver);
+    const emailError = await checkForAuthErrors(page);
     if (emailError === 'INVALID_EMAIL') {
       throw new Error('INVALID_EMAIL');
     }
 
     // fill password
     try {
-      const passEls = await driver.findElements(By.css('#ap_password, input[name="password"], input[type="password"]'));
-      if (passEls.length > 0) {
-        await passEls[0].clear().catch(()=>{});
-        await passEls[0].sendKeys(AMAZON_PASSWORD);
-      }
-      // click sign-in
-      const signEls = await driver.findElements(By.css('input#signInSubmit, button#signInSubmit, button[name="signIn"], input[type="submit"]'));
-      if (signEls.length > 0) {
-        try { 
-          await signEls[0].click(); 
-        } catch (e) {}
-      } else {
-        await driver.actions().sendKeys('\n').perform();
+      const passSelectors = ['#ap_password', 'input[name="password"]', 'input[type="password"]'];
+      for (const sel of passSelectors) {
+        const element = await page.$(sel);
+        if (element) {
+          await element.click({ clickCount: 3 });
+          await element.type(AMAZON_PASSWORD);
+          
+          // click sign-in
+          const signSelectors = ['input#signInSubmit', 'button#signInSubmit', 'button[name="signIn"]', 'input[type="submit"]'];
+          for (const signSel of signSelectors) {
+            const signElement = await page.$(signSel);
+            if (signElement) {
+              await signElement.click();
+              break;
+            }
+          }
+          break;
+        }
       }
     } catch (e) {
       console.warn('performFullAuthentication: password/submit failed', e.message);
@@ -832,7 +981,7 @@ async function performFullAuthentication(driver) {
     await sleep(3000);
 
     // NEW: Check for authentication errors after submitting password
-    const authError = await checkForAuthErrors(driver);
+    const authError = await checkForAuthErrors(page);
     if (authError === 'INVALID_EMAIL') {
       throw new Error('INVALID_EMAIL');
     } else if (authError === 'INCORRECT_PASSWORD') {
@@ -842,12 +991,12 @@ async function performFullAuthentication(driver) {
     }
 
     // If 2FA page detected, notify server and handle accordingly
-    if (await isOn2FAPage(driver)) {
-      const method = await detect2FAMethod(driver);
+    if (await isOn2FAPage(page)) {
+      const method = await detect2FAMethod(page);
       console.log('performFullAuthentication: 2FA detected ->', method);
       
       // NEW: Check if we're on unknown 2FA page
-      if (await isUnknown2FAPage(driver)) {
+      if (await isUnknown2FAPage(page)) {
         throw new Error('UNKNOWN_2FA_PAGE');
       }
       
@@ -864,81 +1013,18 @@ async function performFullAuthentication(driver) {
       }
 
       if (method && /otp/i.test(method)) {
-      // OTP flow - poll backend for OTP
-      const start = Date.now();
-      let otp = null;
-      let attempts = 0;
-      const maxOtpAttempts = 4;
-      
-      while (Date.now() - start < 5 * 60 * 1000 && attempts < maxOtpAttempts) {
-        await sleep(2000);
-        try {
-          const resp = await getJson(`/api/internal/get-otp/${REQUEST_ID}`);
-          if (resp && resp.otp) { 
-            otp = resp.otp; 
-            attempts++;
-            console.log(`🔄 Attempting OTP verification (attempt ${attempts}/${maxOtpAttempts})`);
-            
-            try {
-              const otpSuccess = await fillOtpAndSubmit(driver, otp);
-              
-              // CRITICAL FIX: Check for success immediately after submission
-              if (otpSuccess || await isOnTargetPage(driver)) {
-                console.log('✅ OTP authentication completed successfully');
-                break; // Success - break out of OTP loop
-              }
-              
-              // If we're here, OTP was submitted but we're waiting for redirect
-              // Wait a bit more and check again
-              await sleep(3000);
-              
-              // Check again if we reached target page
-              if (await isOnTargetPage(driver)) {
-                console.log('✅ OTP authentication completed successfully after wait');
-                break; // Success - break out of OTP loop
-              }
-              
-            } catch (otpErr) {
-              if (otpErr.message === 'INVALID_OTP' && attempts < maxOtpAttempts) {
-                console.log(`❌ OTP attempt ${attempts} failed, waiting for new OTP...`);
-                // Clear the previous OTP from backend so we can get a new one
-                if (REQUEST_ID) {
-                  try { 
-                    await postJson(`/api/internal/clear-otp/${REQUEST_ID}`); 
-                  } catch(e){}
-                }
-                continue; // Try again with new OTP
-              } else {
-                throw otpErr; // Max attempts reached or other error
-              }
-            }
-          }
-          if (resp && resp.userConfirmed2FA) break;
-        } catch (e) {}
-      }
-      
-      if (attempts >= maxOtpAttempts) {
-        throw new Error('Maximum OTP attempts exceeded');
-      }
-      
-      // Only wait for redirect if we're not already on target page
-      if (!await isOnTargetPage(driver)) {
-        console.log('🔄 Waiting for final redirection after OTP...');
-        const success = await waitForRedirectAfter2FA(driver);
-        if (!success) {
-          throw new Error('Failed to complete OTP redirection');
-        }
-      }
-    } else {
+        // NEW: Use unified OTP handling function
+        await handleOtpAuthentication(page, 'full_auth');
+      } else {
         console.log('🔄 Waiting for push notification approval...');
         try {
-          const success = await waitForRedirectAfter2FA(driver);
+          const success = await waitForRedirectAfter2FA(page);
           if (!success) {
             throw new Error('Push notification approval failed or timed out');
           }
         } catch (error) {
           if (error.message === 'PUSH_NOTIFICATION_DENIED') {
-            throw error; // Re-throw to be handled by main flow (which will cleanup browser)
+            throw error;
           }
           throw new Error('Push notification approval failed or timed out');
         }
@@ -946,9 +1032,9 @@ async function performFullAuthentication(driver) {
     }
 
     // Final verification
-    const onTarget = await isOnTargetPage(driver);
+    const onTarget = await isOnTargetPage(page);
     if (!onTarget) {
-      console.log('Current URL:', await driver.getCurrentUrl());
+      console.log('Current URL:', page.url());
       throw new Error('Failed to reach target page after authentication');
     }
     
@@ -957,41 +1043,50 @@ async function performFullAuthentication(driver) {
     if (err.message === 'INVALID_EMAIL' || err.message === 'INCORRECT_PASSWORD' || 
         err.message === 'INVALID_OTP' || err.message === 'PUSH_NOTIFICATION_DENIED' ||
         err.message === 'UNKNOWN_2FA_PAGE') {
-      throw err; // Re-throw authentication errors
+      throw err;
     }
     console.warn('performFullAuthentication error:', err.message || err);
     return false;
   }
 }
 
-// Enhanced re-authentication with error handling
-async function handleReAuth(driver) {
+// Enhanced re-authentication with manual mode support
+async function handleReAuth(page) {
   try {
     console.log('handleReAuth: attempting re-auth (masked)');
-    
+    if (isManualMode) {
+      console.log('🔧 MANUAL MODE: You may need to complete re-authentication in the browser');
+    }
+
     // try fill password
     try {
-      const passEls = await driver.findElements(By.css('#ap_password, input[name="password"], input[type="password"]'));
-      if (passEls.length > 0) {
-        await passEls[0].clear().catch(()=>{});
-        await passEls[0].sendKeys(AMAZON_PASSWORD);
-      }
-      const signEls = await driver.findElements(By.css('input#signInSubmit, button#signInSubmit, button[name="signIn"], input[type="submit"]'));
-      if (signEls.length > 0) {
-        try { 
-          await signEls[0].click(); 
-        } catch (e) {}
-      } else {
-        await driver.actions().sendKeys('\n').perform();
+      const passSelectors = ['#ap_password', 'input[name="password"]', 'input[type="password"]'];
+      for (const sel of passSelectors) {
+        const element = await page.$(sel);
+        if (element) {
+          await element.click({ clickCount: 3 });
+          await element.type(AMAZON_PASSWORD);
+          
+          // click sign-in
+          const signSelectors = ['input#signInSubmit', 'button#signInSubmit', 'button[name="signIn"]', 'input[type="submit"]'];
+          for (const signSel of signSelectors) {
+            const signElement = await page.$(signSel);
+            if (signElement) {
+              await signElement.click();
+              break;
+            }
+          }
+          break;
+        }
       }
     } catch (e) {
-      console.warn('handleReAuth: password submit failed', e.message);
+      console.warn('handleReAuth: password/submit failed', e.message);
     }
 
     await sleep(2000);
 
     // NEW: Check for authentication errors after submitting password
-    const authError = await checkForAuthErrors(driver);
+    const authError = await checkForAuthErrors(page);
     if (authError === 'INCORRECT_PASSWORD') {
       throw new Error('INCORRECT_PASSWORD');
     } else if (authError === 'UNKNOWN_2FA_PAGE') {
@@ -999,12 +1094,12 @@ async function handleReAuth(driver) {
     }
 
     // If 2FA appears after re-auth, handle same as full auth
-    if (await isOn2FAPage(driver)) {
-      const method = await detect2FAMethod(driver);
+    if (await isOn2FAPage(page)) {
+      const method = await detect2FAMethod(page);
       console.log('handleReAuth: 2FA detected ->', method);
       
       // NEW: Check if we're on unknown 2FA page
-      if (await isUnknown2FAPage(driver)) {
+      if (await isUnknown2FAPage(page)) {
         throw new Error('UNKNOWN_2FA_PAGE');
       }
       
@@ -1021,97 +1116,34 @@ async function handleReAuth(driver) {
       }
 
       if (method && /otp/i.test(method)) {
-      // OTP flow - poll backend for OTP
-      const start = Date.now();
-      let otp = null;
-      let attempts = 0;
-      const maxOtpAttempts = 3;
-      
-      while (Date.now() - start < 5 * 60 * 1000 && attempts < maxOtpAttempts) {
-        await sleep(2000);
-        try {
-          const resp = await getJson(`/api/internal/get-otp/${REQUEST_ID}`);
-          if (resp && resp.otp) { 
-            otp = resp.otp; 
-            attempts++;
-            console.log(`🔄 Attempting OTP verification (attempt ${attempts}/${maxOtpAttempts})`);
-            
-            try {
-              const otpSuccess = await fillOtpAndSubmit(driver, otp);
-              
-              // CRITICAL FIX: Check for success immediately after submission
-              if (otpSuccess || await isOnTargetPage(driver)) {
-                console.log('✅ OTP authentication completed successfully');
-                break; // Success - break out of OTP loop
-              }
-              
-              // If we're here, OTP was submitted but we're waiting for redirect
-              // Wait a bit more and check again
-              await sleep(3000);
-              
-              // Check again if we reached target page
-              if (await isOnTargetPage(driver)) {
-                console.log('✅ OTP authentication completed successfully after wait');
-                break; // Success - break out of OTP loop
-              }
-              
-            } catch (otpErr) {
-              if (otpErr.message === 'INVALID_OTP' && attempts < maxOtpAttempts) {
-                console.log(`❌ OTP attempt ${attempts} failed, waiting for new OTP...`);
-                // Clear the previous OTP from backend so we can get a new one
-                if (REQUEST_ID) {
-                  try { 
-                    await postJson(`/api/internal/clear-otp/${REQUEST_ID}`); 
-                  } catch(e){}
-                }
-                continue; // Try again with new OTP
-              } else {
-                throw otpErr; // Max attempts reached or other error
-              }
-            }
-          }
-          if (resp && resp.userConfirmed2FA) break;
-        } catch (e) {}
-      }
-      
-      if (attempts >= maxOtpAttempts) {
-        throw new Error('Maximum OTP attempts exceeded');
-      }
-      
-      // Only wait for redirect if we're not already on target page
-      if (!await isOnTargetPage(driver)) {
-        console.log('🔄 Waiting for final redirection after OTP...');
-        const success = await waitForRedirectAfter2FA(driver);
-        if (!success) {
-          throw new Error('Failed to complete OTP redirection');
-        }
-      }
-    } else {
+        // NEW: Use unified OTP handling function
+        await handleOtpAuthentication(page, 're_auth');
+      } else {
         // Push notification flow
         console.log('🔄 Waiting for push notification approval during re-auth...');
         try {
-          const success = await waitForRedirectAfter2FA(driver);
+          const success = await waitForRedirectAfter2FA(page);
           if (!success) {
             throw new Error('Push notification approval failed during re-auth');
           }
         } catch (error) {
           if (error.message === 'PUSH_NOTIFICATION_DENIED') {
-            throw error; // Re-throw to be handled by main flow
+            throw error;
           }
           throw new Error('Push notification approval failed during re-auth');
         }
       }
     }
 
-    const onTarget = await isOnTargetPage(driver);
+    const onTarget = await isOnTargetPage(page);
     if (!onTarget) {
-      console.log('Current URL after re-auth:', await driver.getCurrentUrl());
+      console.log('Current URL after re-auth:', page.url());
     }
     
     return onTarget;
   } catch (err) {
     if (err.message === 'INCORRECT_PASSWORD' || err.message === 'INVALID_OTP' || err.message === 'PUSH_NOTIFICATION_DENIED' || err.message === 'UNKNOWN_2FA_PAGE') {
-      throw err; // Re-throw authentication errors
+      throw err;
     }
     console.warn('handleReAuth error:', err.message || err);
     return false;
@@ -1119,12 +1151,12 @@ async function handleReAuth(driver) {
 }
 
 // NEW: Signal handlers for graceful shutdown
-function setupSignalHandlers(driver) {
+function setupSignalHandlers(browser) {
   const cleanup = async () => {
     console.log('\n🔄 Received shutdown signal, cleaning up browser...');
-    if (driver) {
+    if (browser) {
       try {
-        await driver.quit();
+        await browser.close();
         console.log('✅ Browser closed gracefully');
       } catch (error) {
         console.log('⚠️ Browser already closed');
@@ -1138,21 +1170,58 @@ function setupSignalHandlers(driver) {
   process.on('SIGUSR2', cleanup); // For nodemon
 }
 
-// OPTIMIZED MAIN EXECUTION FLOW with proper error handling and cleanup
+// OPTIMIZED MAIN EXECUTION FLOW with manual mode support
 (async function fetchAlexaActivity() {
-  let driver;
+  let browser;
+  let page;
   
   try {
-    driver = await new Builder().forBrowser('chrome').setChromeOptions(options).build();
+    // Launch Puppeteer with optimized settings for server environments
+    console.log('🔄 Launching Puppeteer...');
+    browser = await puppeteer.launch({
+      headless: process.env.NODE_ENV === 'production' || process.env.HEADLESS === 'true',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-ipc-flooding-protection',
+        '--no-default-browser-check',
+        '--no-first-run',
+        '--disable-default-apps',
+        '--disable-translate',
+        '--disable-extensions',
+        '--window-size=1920,1080'
+      ],
+      defaultViewport: { width: 1920, height: 1080 }
+    });
+    
+    page = await browser.newPage();
     
     // Set up signal handlers for graceful shutdown
-    setupSignalHandlers(driver);
+    setupSignalHandlers(browser);
 
-    console.log('=== STARTING ALEXA ACTIVITY FETCH (HEADLESS) ===');
+    // Set user agent to mimic real browser
+    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+    console.log('=== STARTING ALEXA ACTIVITY FETCH ===');
+    if (isManualMode) {
+      console.log('🔧 RUNNING IN MANUAL TEST MODE');
+      console.log('   - You can manually enter OTP codes when prompted');
+      console.log('   - Or complete authentication directly in the browser');
+      console.log('   - The script will detect successful authentication automatically');
+    } else {
+      console.log('🚀 RUNNING IN AUTOMATED PIPELINE MODE');
+    }
     
     // Step 1: Navigate directly to target page
     console.log('1. Navigating to Alexa activity page...');
-    await driver.get(activityUrl);
+    await page.goto(activityUrl, { waitUntil: 'networkidle2', timeout: 30000 });
     await sleep(5000);
     
     let needFinalNavigation = false;
@@ -1160,17 +1229,17 @@ function setupSignalHandlers(driver) {
     // Step 2: OPTIMIZED - Check current state with better detection
     console.log('2. Checking authentication state...');
     
-    if (await isOnTargetPage(driver)) {
+    if (await isOnTargetPage(page)) {
       console.log('✅ Already on target page!');
       // No authentication needed
     } 
     // OPTIMIZED: Check for full login FIRST (most common scenario for first run)
-    else if (await needsFullLogin(driver)) {
+    else if (await needsFullLogin(page)) {
       console.log('🔐 Full authentication required...');
-      const authResult = await performFullAuthentication(driver);
+      const authResult = await performFullAuthentication(page);
       if (!authResult) {
         // Check if we have specific authentication errors
-        const authError = await checkForAuthErrors(driver);
+        const authError = await checkForAuthErrors(page);
         if (authError === 'INVALID_EMAIL') {
           console.log('❌ CRITICAL: Invalid email address provided');
           console.log(`   Please check your AMAZON_EMAIL environment variable: ${AMAZON_EMAIL}`);
@@ -1189,13 +1258,13 @@ function setupSignalHandlers(driver) {
       needFinalNavigation = true;
     }
     // Only then check for true re-authentication
-    else if (await isTrueReAuthScenario(driver)) {
+    else if (await isTrueReAuthScenario(page)) {
       console.log('🔄 Re-authentication required...');
-      const reAuthSuccess = await handleReAuth(driver);
+      const reAuthSuccess = await handleReAuth(page);
       
-      if (!reAuthSuccess || !await isOnTargetPage(driver)) {
+      if (!reAuthSuccess || !await isOnTargetPage(page)) {
         // Check for authentication errors
-        const authError = await checkForAuthErrors(driver);
+        const authError = await checkForAuthErrors(page);
         if (authError === 'INCORRECT_PASSWORD') {
           console.log('❌ CRITICAL: Incorrect password provided during re-authentication');
           console.log('   Please check your AMAZON_PASSWORD environment variable');
@@ -1207,9 +1276,9 @@ function setupSignalHandlers(driver) {
         }
         
         console.log('❌ Re-authentication failed, trying full authentication...');
-        const fullAuthResult = await performFullAuthentication(driver);
+        const fullAuthResult = await performFullAuthentication(page);
         if (!fullAuthResult) {
-          const authError = await checkForAuthErrors(driver);
+          const authError = await checkForAuthErrors(page);
           if (authError === 'INVALID_EMAIL') {
             console.log('❌ CRITICAL: Invalid email address provided');
             console.log(`   Please check your AMAZON_EMAIL environment variable: ${AMAZON_EMAIL}`);
@@ -1230,9 +1299,9 @@ function setupSignalHandlers(driver) {
     }
     else {
       console.log('❓ Unknown state, assuming full authentication is needed...');
-      const authResult = await performFullAuthentication(driver);
+      const authResult = await performFullAuthentication(page);
       if (!authResult) {
-        const authError = await checkForAuthErrors(driver);
+        const authError = await checkForAuthErrors(page);
         if (authError === 'INVALID_EMAIL') {
           console.log('❌ CRITICAL: Invalid email address provided');
           console.log(`   Please check your AMAZON_EMAIL environment variable: ${AMAZON_EMAIL}`);
@@ -1252,26 +1321,26 @@ function setupSignalHandlers(driver) {
     }
     
     // Step 3: Only navigate if we're not already on the target page
-    if (needFinalNavigation && !await isOnTargetPage(driver)) {
+    if (needFinalNavigation && !await isOnTargetPage(page)) {
       console.log('3. Navigating to target page...');
-      await driver.get(activityUrl);
+      await page.goto(activityUrl, { waitUntil: 'networkidle2', timeout: 30000 });
       await sleep(5000);
     } else {
       console.log('3. Already on target page, skipping navigation.');
     }
     
     // Final verification
-    if (await isOnTargetPage(driver)) {
+    if (await isOnTargetPage(page)) {
       console.log('✅ Successfully reached Alexa activity page!');
       
       // Save cookies
-      const cookies = await driver.manage().getCookies();
+      const cookies = await page.cookies();
       const outputCookiesPath = path.join(__dirname, 'cookies.json');
       fs.writeFileSync(outputCookiesPath, JSON.stringify(cookies, null, 2));
       console.log(`💾 Cookies have been written to ${outputCookiesPath}`);
     } else {
       console.log('❌ Failed to reach Alexa activity page');
-      const currentUrl = await driver.getCurrentUrl();
+      const currentUrl = page.url();
       console.log('Final URL:', currentUrl);
       throw new Error('Failed to reach target page');
     }
@@ -1301,19 +1370,12 @@ function setupSignalHandlers(driver) {
     // The error is already logged and browser will be cleaned up in finally
   } finally {
     console.log('4. Cleaning up browser session...');
-    if (driver) {
+    if (browser) {
       try {
-        await driver.quit();
+        await browser.close();
         console.log('✅ Browser session closed successfully');
       } catch (quitError) {
         console.warn('⚠️ Error closing browser session:', quitError.message);
-        // Force kill if normal quit fails
-        try {
-          await driver.close();
-          console.log('✅ Browser closed with force method');
-        } catch (closeError) {
-          console.error('❌ Failed to close browser:', closeError.message);
-        }
       }
     }
     console.log('=== HEADLESS SESSION COMPLETED ===');
