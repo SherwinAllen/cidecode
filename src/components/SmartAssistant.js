@@ -1269,7 +1269,7 @@ const SmartAssistant = () => {
               <p style={{ marginBottom: '15px', fontSize: '1.1rem', lineHeight: '1.5', color: '#ffa' }}>
                 Data was acquired too many times with this account.
               </p>
-              <p style={{ marginBottom: '20px', fontSize: '1rem', color: '#ffb', fontStyle: 'italic' }}>
+              <p style={{ marginBottom: '20px', fontSize: '1rem', color: '#ffb' }}>
                 Amazon is asking for additional verification that cannot be automated.
               </p>
               <p style={{ marginBottom: '20px', fontSize: '1rem', color: '#ff8' }}>

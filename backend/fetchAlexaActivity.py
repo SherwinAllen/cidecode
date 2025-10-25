@@ -4,6 +4,10 @@ import re
 import time
 from playwright.sync_api import sync_playwright
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
+HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 
 # Global lists to track processed data
 ALL_TRANSCRIPTS = []
@@ -707,7 +711,7 @@ with sync_playwright() as p:
     initialize_output_files(clear_existing=True)
 
     # Launch the browser
-    browser = p.chromium.launch(headless=False)
+    browser = p.chromium.launch(headless=HEADLESS)
     context = browser.new_context()
 
     # Load cookies from the file
