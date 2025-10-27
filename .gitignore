@@ -80,8 +80,8 @@ steps_per_day.png
 # -----------------------
 # If matched_audio_transcripts.json is generated, ignore it
 matched_audio_transcripts.json
-# If audio_urls.json is generated, ignore it (uncomment if needed)
-# audio_urls.json
+alexa_audio_report.html
+enhanced_audio_transcripts.json
 
 # -----------------------
 # Git LFS / attributes

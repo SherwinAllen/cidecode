@@ -440,14 +440,32 @@ const SmartAssistant = () => {
       if (!dl.ok) {
         throw new Error('Download failed');
       }
-      const blob = await dl.blob();
-      const link = document.createElement('a');
-      link.href = window.URL.createObjectURL(blob);
-      link.download = 'matched_audio_transcripts.json';
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(link.href);
+      
+      // Check if we have the new HTML report or fall back to JSON
+      const contentType = dl.headers.get('content-type');
+      
+      if (contentType && contentType.includes('text/html')) {
+        // HTML report download
+        const blob = await dl.blob();
+        const link = document.createElement('a');
+        link.href = window.URL.createObjectURL(blob);
+        link.download = 'alexa_voice_activity_report.html';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(link.href);
+      } else {
+        // Fallback to JSON download
+        const blob = await dl.blob();
+        const link = document.createElement('a');
+        link.href = window.URL.createObjectURL(blob);
+        link.download = 'matched_audio_transcripts.json';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(link.href);
+      }
+      
       setHasDownloaded(true);
     } catch (e) {
       console.error('Download failed', e);

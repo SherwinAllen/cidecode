@@ -2,12 +2,12 @@ import os
 import json
 import re
 import time
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright # type: ignore
 from datetime import datetime
-from dotenv import load_dotenv
+from dotenv import load_dotenv # type: ignore
 
 load_dotenv()
-HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
+HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
 
 # Global lists to track processed data
 ALL_TRANSCRIPTS = []
@@ -711,7 +711,7 @@ with sync_playwright() as p:
     initialize_output_files(clear_existing=True)
 
     # Launch the browser
-    browser = p.chromium.launch(headless=HEADLESS)
+    browser = p.chromium.launch(headless=HEADLESS, args=["--mute-audio"])
     context = browser.new_context()
 
     # Load cookies from the file

@@ -199,8 +199,13 @@ app.post('/api/packet-report', (req, res) => {
     const cookiesScript = path.join(__dirname, 'GenerateAmazonCookie.js');
     const fetchScript = path.join(__dirname, 'fetchAlexaActivity.py');
     const syncScript = path.join(__dirname, 'SyncAudioTranscripts.py');
+    // NEW: Audio download and report generation scripts
+    const downloadAudioScript = path.join(__dirname, 'downloadAlexaAudio.py');
+    const generateReportScript = path.join(__dirname, 'generateAudioReport.py');
     const hashScript = path.join(__dirname, 'hash.py');
     const jsonPath = path.join(__dirname, '..', 'matched_audio_transcripts.json');
+    // NEW: html report path
+    const htmlReportPath = path.join(__dirname, '..', 'alexa_audio_report.html');
 
     const env = { ...process.env, AMAZON_EMAIL: email, AMAZON_PASSWORD: password, REQUEST_ID: requestId };
 
@@ -464,36 +469,91 @@ app.post('/api/packet-report', (req, res) => {
               if (stdout.includes('Final mapping saved')) {
                 const mappingMatch = stdout.match(/entries: (\d+)\)/);
                 if (mappingMatch) {
-                  addLog(`Data organization complete (${mappingMatch[1]} entries processed)`, 95);
+                  addLog(`Data organization complete (${mappingMatch[1]} entries processed)`, 92);
                 }
               }
               resolve();
             });
           });
 
-          // Step 4: hash and prepare JSON path for download - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
+          // NEW: Step 4: Download audio files - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
           if (!requests[requestId].errorType) {
-            requests[requestId].step = 'hash';
-            addLog('Finalizing data package...', 98);
+            requests[requestId].step = 'download_audio';
+            addLog('Downloading audio files for permanent access...', 94);
             
             await new Promise((resolve, reject) => {
-              exec(`python3 "${hashScript}" "${jsonPath}"`, { env }, (err, stdout, stderr) => {
+              exec(`python3 "${downloadAudioScript}"`, { env }, (err, stdout, stderr) => {
                 if (err) {
-                  console.warn(`[${requestId}] hash error:`, err);
-                  // Don't reject here as hash failure shouldn't stop the download
+                  console.warn(`[${requestId}] Audio download warning:`, err);
+                  // Don't fail the pipeline if audio download has issues
                 }
-                console.log(`[${requestId}] hash output:`, stdout);
+                console.log(`[${requestId}] Audio download output:`, stdout);
+                if (stderr) console.error(`[${requestId}] Audio download stderr:`, stderr);
+                
+                // Parse download results
+                if (stdout.includes('Download Summary')) {
+                  const successMatch = stdout.match(/✅ Successful: (\d+)/);
+                  const failedMatch = stdout.match(/❌ Failed: (\d+)/);
+                  if (successMatch && failedMatch) {
+                    addLog(`Audio download: ${successMatch[1]} successful, ${failedMatch[1]} failed`, 95);
+                  }
+                }
                 resolve();
               });
             });
 
-            requests[requestId].step = 'completed';
-            requests[requestId].filePath = jsonPath;
-            requests[requestId].done = true;
-            requests[requestId].status = 'completed';
-            addLog('Data extraction complete! Your file is ready for download.', 100);
-            
-            console.log(`[${requestId}] Pipeline completed successfully.`);
+            // NEW: Step 5: Generate comprehensive report - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
+            if (!requests[requestId].errorType) {
+              requests[requestId].step = 'generate_report';
+              addLog('Generating comprehensive HTML report with embedded audio...', 97);
+              
+              await new Promise((resolve, reject) => {
+                exec(`python3 "${generateReportScript}"`, { env }, (err, stdout, stderr) => {
+                  if (err) {
+                    console.error(`[${requestId}] Report generation error:`, err);
+                    return reject(err);
+                  }
+                  console.log(`[${requestId}] Report generation output:`, stdout);
+                  if (stderr) console.error(`[${requestId}] Report generation stderr:`, stderr);
+                  
+                  // NEW: Check for audio cleanup completion
+                  if (stdout.includes('Temporary audio files have been cleaned up')) {
+                    addLog('Audio files cleaned up to save storage space', 98);
+                  }
+                  
+                  if (stdout.includes('HTML REPORT GENERATION COMPLETE')) {
+                    addLog('Comprehensive HTML report generated with embedded audio!', 99);
+                  }
+                  resolve();
+                });
+              });
+
+              // NEW: Step 6: hash and prepare final report for download - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
+              if (!requests[requestId].errorType) {
+                requests[requestId].step = 'hash';
+                addLog('Finalizing report package...', 99);
+                
+                await new Promise((resolve, reject) => {
+                  exec(`python3 "${hashScript}" "${htmlReportPath}"`, { env }, (err, stdout, stderr) => {
+                    if (err) {
+                      console.warn(`[${requestId}] hash error:`, err);
+                      // Don't reject here as hash failure shouldn't stop the download
+                    }
+                    console.log(`[${requestId}] hash output:`, stdout);
+                    resolve();
+                  });
+                });
+
+                requests[requestId].step = 'completed';
+                // NEW: Set filePath to the html report instead of HTML
+                requests[requestId].filePath = htmlReportPath;
+                requests[requestId].done = true;
+                requests[requestId].status = 'completed';
+                addLog('Data extraction complete! Your comprehensive HTML report with embedded audio is ready for download.', 100);
+                
+                console.log(`[${requestId}] Pipeline completed successfully with embedded audio report.`);
+              }
+            }
           }
         }
       }
@@ -613,6 +673,7 @@ app.post('/api/cancel-acquisition/:id', async (req, res) => {
                 resolve();
               }, 3000);
               
+              // Clear timeout if process exits normally
               child.on('exit', () => {
                 clearTimeout(timeout);
                 console.log(`[${requestId}] Spawn process exited normally`);
@@ -727,6 +788,13 @@ app.get('/api/download/:id', (req, res) => {
   if (!info.done) return res.status(400).send('Not ready');
   const filePath = info.filePath;
   if (!filePath || !fs.existsSync(filePath)) return res.status(500).send('File not found');
+  
+  // NEW: Check if it's html and set appropriate headers
+  if (filePath.endsWith('.html')) {
+    res.setHeader('Content-Type', 'multipart/related');
+    res.setHeader('Content-Disposition', 'attachment; filename="alexa_voice_activity_report.html"');
+  }
+  
   res.download(filePath);
 });
 

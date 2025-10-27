@@ -1108,7 +1108,7 @@ function setupSignalHandlers(browser) {
 
     const headless = process.env.HEADLESS
       ? process.env.HEADLESS.toLowerCase() === 'true'
-      : true;
+      : false;
 
     console.log('🔄 Launching Puppeteer...');
     browser = await puppeteer.launch({
