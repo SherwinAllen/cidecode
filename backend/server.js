@@ -385,7 +385,7 @@ app.post('/api/packet-report', (req, res) => {
       if (!requests[requestId].errorType) {
         requests[requestId].step = 'fetch';
         requests[requestId].status = 'running';
-        addLog('Starting data extraction from your account...', 45);
+        addLog('Starting data extraction from your account... (this may take sometime) ', 45);
 
         let activityCount = 0;
         // In the fetch step, replace the custom object with the actual process:

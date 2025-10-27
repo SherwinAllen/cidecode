@@ -2,7 +2,6 @@
 import React from 'react';
 import { useParams } from 'react-router-dom';
 import SmartAssistant from './SmartAssistant';
-import SmartCamera from './SmartCamera';
 import SmartWatch from './SmartWatch';
 
 const DevicePage = () => {
@@ -11,8 +10,6 @@ const DevicePage = () => {
   switch (deviceName?.toLowerCase()) {
     case 'smartassistant':
       return <SmartAssistant />;
-    // case 'smartcamera':
-    //   return <SmartCamera />;
     case 'smartwatch':
       return <SmartWatch />;
     default:
