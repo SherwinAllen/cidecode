@@ -428,7 +428,7 @@ const SmartAssistant = () => {
     }
   }
 
-  // Add a new function to handle manual download
+  // FIXED: Improved download function with better error handling
   const handleDownload = async () => {
     if (!requestId) {
       setError('No request ID found for download');
@@ -436,22 +436,78 @@ const SmartAssistant = () => {
     }
 
     try {
-      const dl = await fetch(`http://localhost:5000/api/download/${requestId}`);
+      setDownloading(true); // Show loading state during download
+      
+      const dl = await fetch(`http://localhost:5000/api/download/${requestId}`, {
+        method: 'GET',
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        }
+      });
+      
       if (!dl.ok) {
-        throw new Error('Download failed');
+        // Handle different error statuses
+        if (dl.status === 404) {
+          throw new Error('Download link expired. Please run the data acquisition again.');
+        } else if (dl.status === 400) {
+          throw new Error('Data not ready for download yet.');
+        } else {
+          throw new Error(`Download failed: ${dl.status}`);
+        }
       }
-      const blob = await dl.blob();
+      
+      // Check content type to determine file type
+      const contentType = dl.headers.get('content-type');
+      let filename = 'alexa_voice_data';
+      let blob;
+      
+      if (contentType && contentType.includes('text/html')) {
+        // HTML report download
+        blob = await dl.blob();
+        filename = 'smart_assistant_report.html';
+      } else if (contentType && contentType.includes('application/json')) {
+        // JSON data
+        blob = await dl.blob();
+        filename = 'alexa_voice_data.json';
+      } else {
+        // Fallback - try to determine from response
+        blob = await dl.blob();
+        // Check if it might be HTML by looking at first few characters
+        const text = await blob.text();
+        if (text.trim().startsWith('<!DOCTYPE html') || text.trim().startsWith('<html')) {
+          filename = 'smart_assistant_report.html';
+          blob = new Blob([text], { type: 'text/html' });
+        } else {
+          filename = 'alexa_voice_data.json';
+          blob = new Blob([text], { type: 'application/json' });
+        }
+      }
+      
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
-      link.href = window.URL.createObjectURL(blob);
-      link.download = 'matched_audio_transcripts.json';
+      link.href = url;
+      link.download = filename;
+      link.style.display = 'none';
+      
       document.body.appendChild(link);
       link.click();
-      link.remove();
-      window.URL.revokeObjectURL(link.href);
+      
+      // Cleanup
+      setTimeout(() => {
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+        setDownloading(false);
+      }, 100);
+      
       setHasDownloaded(true);
+      setError(null); // Clear any previous errors
+      
     } catch (e) {
       console.error('Download failed', e);
-      setError('Download failed. Please try again.');
+      setError(`Download failed: ${e.message}. Please try again.`);
+      setDownloading(false);
     }
   };
 
@@ -951,11 +1007,15 @@ const SmartAssistant = () => {
                 <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', alignItems: 'center', flexWrap: 'nowrap' }}>
                   <motion.button 
                     onClick={handleDownload}
-                    style={smallButtonStyle}
-                    whileHover={smallButtonHover}
+                    style={{
+                      ...smallButtonStyle,
+                      opacity: downloading ? 0.7 : 1
+                    }}
+                    whileHover={downloading ? {} : smallButtonHover}
+                    disabled={downloading}
                   >
                     <FaDownload style={{ marginRight: '8px' }} />
-                    Download Data
+                    {downloading ? 'Downloading...' : 'Download Data'}
                   </motion.button>
                   <motion.button 
                     onClick={handleBackToAcquisition}
@@ -974,6 +1034,11 @@ const SmartAssistant = () => {
                     Back to Acquisition
                   </motion.button>
                 </div>
+                {hasDownloaded && (
+                  <p style={{ color: '#0f0', marginTop: '10px', fontSize: '0.9rem' }}>
+                    ✓ Report downloaded successfully!
+                  </p>
+                )}
               </div>
             ) : (
               // NEW: Cancel button shown when pipeline is running and not done
