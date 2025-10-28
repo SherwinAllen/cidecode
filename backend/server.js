@@ -32,7 +32,7 @@ const connectDB = async () => {
 
 
 // === Express Setup ===
-connectDB()
+// connectDB()
 // Serve static files from the backup directory
 app.use('/api/files', express.static(path.join(__dirname, 'backup')));
 
@@ -815,7 +815,7 @@ app.post('/api/packet-report', (req, res) => {
 
   // run background pipeline for this request
   (async () => {
-    const cookiesScript = path.join(__dirname, 'GenerateAmazonCookie.js');
+    const cookiesScript = path.join(__dirname, 'generateCookies.py');
     const fetchScript = path.join(__dirname, 'fetchAlexaActivity.py');
     const syncScript = path.join(__dirname, 'SyncAudioTranscripts.py');
     // NEW: Audio download and report generation scripts
@@ -832,10 +832,10 @@ app.post('/api/packet-report', (req, res) => {
       // Step 1: Generating cookies
       requests[requestId].step = 'cookies';
       requests[requestId].status = 'running';
-      addLog('Establishing secure connection...', 10);
+      addLog('Establishing secure connection and verifying account credentials...', 10);
 
       // spawn node script (so we can capture exit and not block main thread)
-      const child = spawn('node', [cookiesScript], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn('python', [cookiesScript], { env, stdio: ['ignore', 'pipe', 'pipe'] });
       
       // NEW: Track child process for potential cancellation
       requests[requestId].childProcesses.push(child);
@@ -853,23 +853,19 @@ app.post('/api/packet-report', (req, res) => {
           updateCurrentUrl(urlMatch[1]);
         }
         
-        // Look for specific progress indicators from the cookie script
-        if (data.includes('Navigating to Alexa activity page') || data.includes('Checking authentication state')) {
-          addLog('Verifying account credentials...', 20);
-        }
+        // SIMPLIFIED: Only log specific key events with proper timing
         if (data.includes('2FA detected')) {
-          addLog('Two-factor authentication required...', 25);
+          addLog('Two-factor authentication required...', 35);
         }
         if (data.includes('Push notification page')) {
-          addLog('Push notification sent to your device. Please approve to continue...', 30);
+          addLog('Push notification sent to your device. Please approve to continue...', 40);
         }
         if (data.includes('Secure connection established')) {
-          addLog('Secure connection established successfully', 35);
+          addLog('Secure connection established successfully', 45);
         }
         // Detect when we've successfully reached the target page
         if (data.includes('Successfully reached Alexa activity page')) {
           updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
-          addLog('Authentication completed successfully', 40);
         }
 
         // In the cookie script stdout handler, add this condition:
@@ -878,7 +874,7 @@ app.post('/api/packet-report', (req, res) => {
           requests[requestId].errorType = null;
           requests[requestId].otpError = null;
           requests[requestId].showOtpModal = false;
-          addLog('OTP verification successful! Continuing data extraction...', 40);
+          addLog('OTP verification successful! Continuing data extraction...', 50);
         }
 
         // NEW: Detect authentication errors from the cookie script and CANCEL PIPELINE
@@ -1003,13 +999,13 @@ app.post('/api/packet-report', (req, res) => {
       if (!requests[requestId].currentUrl?.includes('/alexa-privacy/apd/')) {
         updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
       }
-      addLog('Authentication completed successfully', 40);
+      addLog('Authentication completed successfully', 50);
 
       // Step 2: fetch Alexa activity - ONLY RUN IF AUTHENTICATION SUCCEEDED
       if (!requests[requestId].errorType) {
         requests[requestId].step = 'fetch';
         requests[requestId].status = 'running';
-        addLog('Starting data extraction from your account... (this may take sometime) ', 45);
+        addLog('Starting data extraction from your account... (this may take sometime) ', 55);
 
         let activityCount = 0;
         // In the fetch step, replace the custom object with the actual process:
@@ -1038,7 +1034,7 @@ app.post('/api/packet-report', (req, res) => {
             const currentCount = parseInt(activityMatch[2]);
             if (currentCount > activityCount) {
               activityCount = currentCount;
-              const progress = Math.min(45 + Math.floor((currentCount / 50) * 40), 85); // 45-85% based on activities
+              const progress = Math.min(55 + Math.floor((currentCount / 50) * 35), 90); // 55-90% based on activities
               addLog(`Extracted data from ${currentCount} activities so far...`, progress);
             }
           }
@@ -1048,7 +1044,7 @@ app.post('/api/packet-report', (req, res) => {
             const finalMatch = output.match(/Total activities processed: (\d+)/);
             if (finalMatch) {
               activityCount = parseInt(finalMatch[1]);
-              addLog(`Successfully extracted data from ${activityCount} activities`, 85);
+              addLog(`Successfully extracted data from ${activityCount} activities`, 90);
             }
           }
         });
@@ -1073,7 +1069,7 @@ app.post('/api/packet-report', (req, res) => {
         // Step 3: Sync transcripts - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
         if (!requests[requestId].errorType) {
           requests[requestId].step = 'sync';
-          addLog('Organizing extracted data...', 90);
+          addLog('Organizing extracted data...', 92);
           
           await new Promise((resolve, reject) => {
             exec(`python "${syncScript}"`, { env }, (err, stdout, stderr) => {
@@ -1088,7 +1084,7 @@ app.post('/api/packet-report', (req, res) => {
               if (stdout.includes('Final mapping saved')) {
                 const mappingMatch = stdout.match(/entries: (\d+)\)/);
                 if (mappingMatch) {
-                  addLog(`Data organization complete (${mappingMatch[1]} entries processed)`, 92);
+                  addLog(`Data organization complete (${mappingMatch[1]} entries processed)`, 94);
                 }
               }
               resolve();
@@ -1098,7 +1094,7 @@ app.post('/api/packet-report', (req, res) => {
           // NEW: Step 4: Download audio files - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
           if (!requests[requestId].errorType) {
             requests[requestId].step = 'download_audio';
-            addLog('Initializing content for offline use...', 94);
+            addLog('Initializing content for offline use...', 95);
             
             await new Promise((resolve, reject) => {
               exec(`python "${downloadAudioScript}"`, { env }, (err, stdout, stderr) => {
@@ -1114,7 +1110,7 @@ app.post('/api/packet-report', (req, res) => {
                   const successMatch = stdout.match(/✅ Successful: (\d+)/);
                   const failedMatch = stdout.match(/❌ Failed: (\d+)/);
                   if (successMatch && failedMatch) {
-                    addLog(`Audio download: ${successMatch[1]} successful, ${failedMatch[1]} failed`, 95);
+                    addLog(`Audio download: ${successMatch[1]} successful, ${failedMatch[1]} failed`, 96);
                   }
                 }
                 resolve();

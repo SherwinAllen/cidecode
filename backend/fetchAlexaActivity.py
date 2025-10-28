@@ -7,7 +7,7 @@ from datetime import datetime
 from dotenv import load_dotenv # type: ignore
 
 load_dotenv()
-HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
+HEADLESS = os.getenv("HEADLESS", "true").lower() == "true"
 
 # Global lists to track processed data
 ALL_TRANSCRIPTS = []
