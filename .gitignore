@@ -80,7 +80,7 @@ steps_per_day.png
 # -----------------------
 # If matched_audio_transcripts.json is generated, ignore it
 matched_audio_transcripts.json
-alexa_audio_report.html
+smart_assistant_report.html
 enhanced_audio_transcripts.json
 
 # -----------------------

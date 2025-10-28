@@ -271,6 +271,19 @@ def create_final_mapping(audio_urls, transcripts_data):
         mapping[u] = t
     return mapping
 
+def cleanup_input_files(audio_urls_file, transcripts_file):
+    """Clean up input files after successful processing"""
+    try:
+        if os.path.exists(audio_urls_file):
+            os.remove(audio_urls_file)
+            print(f"🧹 Deleted: {audio_urls_file}")
+        
+        if os.path.exists(transcripts_file):
+            os.remove(transcripts_file)
+            print(f"🧹 Deleted: {transcripts_file}")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not clean up input files: {e}")
+
 # ----------------------
 # Main run with file path arguments
 # ----------------------
@@ -323,6 +336,10 @@ def main(audio_urls_file, transcripts_file, output_file="matched_audio_transcrip
     spoken_count = sum(1 for t in filtered_transcripts if t.get("type") == "spoken")
     system_count = len(filtered_transcripts) - spoken_count
     print(f"📈 Final breakdown: {spoken_count} spoken, {system_count} system entries")
+
+    # Clean up input files after successful processing
+    print(f"\n🧹 Cleaning up input files...")
+    cleanup_input_files(audio_urls_file, transcripts_file)
 
 if __name__ == "__main__":
     audio_file = "backend/audio_urls.json"

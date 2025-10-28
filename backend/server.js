@@ -25,7 +25,7 @@ app.get('/api/packet-report', (req, res) => {
     const script3 = path.join(__dirname, 'generateTimeline.py');
 
     // Execute all three Python scripts sequentially.
-    exec(`python3 "${script1}" && python3 "${script2}" && python3 "${script3}"`, (err, stdout, stderr) => {
+    exec(`python "${script1}" && python "${script2}" && python "${script3}"`, (err, stdout, stderr) => {
       if (err) {
         console.error('Error executing Python scripts:', err);
         res.status(500).send('Error generating DOCX file');
@@ -37,7 +37,7 @@ app.get('/api/packet-report', (req, res) => {
       // Once the Python scripts complete, hash the DOCX file.
       const docxPath = path.join(__dirname, '..', 'Forensic_Log_Report.docx');
       const hashScript = path.join(__dirname, 'hash.py');
-      exec(`python3 "${hashScript}" "${docxPath}"`, (hashErr, hashStdout, hashStderr) => {
+      exec(`python "${hashScript}" "${docxPath}"`, (hashErr, hashStdout, hashStderr) => {
         if (hashErr) {
           console.error('Error computing hash for DOCX file:', hashErr);
         } else {
@@ -67,6 +67,45 @@ app.get('/api/packet-report', (req, res) => {
 // In-memory store for live SmartAssistant requests
 const requests = {}; // requestId -> { status, step, progress, logs, method, message, otp, filePath, done, error, userConfirmed2FA, currentUrl, errorType }
 
+// Clean up previous pipeline files
+function cleanupPreviousPipelineFiles() {
+  const filesToCleanup = [
+    'backend/audio_urls.json',
+    'alexa_activity_log.txt', 
+    'matched_audio_transcripts.json',
+    'enhanced_audio_transcripts.json',
+    'smart_assistant_report.html'
+  ];
+  
+  console.log('🧹 Cleaning up previous pipeline files...');
+  
+  filesToCleanup.forEach(filePath => {
+    try {
+      const fullPath = path.join(__dirname, '..', filePath);
+      if (fs.existsSync(fullPath)) {
+        fs.unlinkSync(fullPath);
+        console.log(`   Deleted: ${filePath}`);
+      }
+    } catch (error) {
+      console.log(`   Could not delete ${filePath}: ${error.message}`);
+    }
+  });
+  
+  // Also clean up downloaded_audio directory if it exists
+  const audioDir = path.join(__dirname, '..', 'downloaded_audio');
+  try {
+    if (fs.existsSync(audioDir)) {
+      fs.readdirSync(audioDir).forEach(file => {
+        fs.unlinkSync(path.join(audioDir, file));
+      });
+      fs.rmdirSync(audioDir);
+      console.log('   Deleted: downloaded_audio directory');
+    }
+  } catch (error) {
+    console.log(`   Could not clean up audio directory: ${error.message}`);
+  }
+}
+
 // POST entrypoint from frontend SmartAssistant to start headless pipeline
 app.post('/api/packet-report', (req, res) => {
   const { email, password, source } = req.body;
@@ -77,6 +116,9 @@ app.post('/api/packet-report', (req, res) => {
   if (source !== 'SmartAssistant') {
     return res.status(400).send('Invalid source');
   }
+
+  // Clean up previous pipeline files before starting new one
+  cleanupPreviousPipelineFiles();
 
   // create request id and initial state
   const requestId = randomUUID();
@@ -205,7 +247,7 @@ app.post('/api/packet-report', (req, res) => {
     const hashScript = path.join(__dirname, 'hash.py');
     const jsonPath = path.join(__dirname, '..', 'matched_audio_transcripts.json');
     // NEW: html report path
-    const htmlReportPath = path.join(__dirname, '..', 'alexa_audio_report.html');
+    const htmlReportPath = path.join(__dirname, '..', 'smart_assistant_report.html');
 
     const env = { ...process.env, AMAZON_EMAIL: email, AMAZON_PASSWORD: password, REQUEST_ID: requestId };
 
@@ -394,7 +436,7 @@ app.post('/api/packet-report', (req, res) => {
 
         let activityCount = 0;
         // In the fetch step, replace the custom object with the actual process:
-        const fetchProcess = exec(`python3 "${fetchScript}"`, { env });
+        const fetchProcess = exec(`python "${fetchScript}"`, { env });
 
         // Track the actual process with a simple wrapper
         const fetchChild = {
@@ -457,7 +499,7 @@ app.post('/api/packet-report', (req, res) => {
           addLog('Organizing extracted data...', 90);
           
           await new Promise((resolve, reject) => {
-            exec(`python3 "${syncScript}"`, { env }, (err, stdout, stderr) => {
+            exec(`python "${syncScript}"`, { env }, (err, stdout, stderr) => {
               if (err) {
                 console.error(`[${requestId}] sync error:`, err);
                 return reject(err);
@@ -479,10 +521,10 @@ app.post('/api/packet-report', (req, res) => {
           // NEW: Step 4: Download audio files - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
           if (!requests[requestId].errorType) {
             requests[requestId].step = 'download_audio';
-            addLog('Downloading audio files for permanent access...', 94);
+            addLog('Initializing content for offline use...', 94);
             
             await new Promise((resolve, reject) => {
-              exec(`python3 "${downloadAudioScript}"`, { env }, (err, stdout, stderr) => {
+              exec(`python "${downloadAudioScript}"`, { env }, (err, stdout, stderr) => {
                 if (err) {
                   console.warn(`[${requestId}] Audio download warning:`, err);
                   // Don't fail the pipeline if audio download has issues
@@ -508,7 +550,7 @@ app.post('/api/packet-report', (req, res) => {
               addLog('Generating comprehensive HTML report with embedded audio...', 97);
               
               await new Promise((resolve, reject) => {
-                exec(`python3 "${generateReportScript}"`, { env }, (err, stdout, stderr) => {
+                exec(`python "${generateReportScript}"`, { env }, (err, stdout, stderr) => {
                   if (err) {
                     console.error(`[${requestId}] Report generation error:`, err);
                     return reject(err);
@@ -534,7 +576,7 @@ app.post('/api/packet-report', (req, res) => {
                 addLog('Finalizing report package...', 99);
                 
                 await new Promise((resolve, reject) => {
-                  exec(`python3 "${hashScript}" "${htmlReportPath}"`, { env }, (err, stdout, stderr) => {
+                  exec(`python "${hashScript}" "${htmlReportPath}"`, { env }, (err, stdout, stderr) => {
                     if (err) {
                       console.warn(`[${requestId}] hash error:`, err);
                       // Don't reject here as hash failure shouldn't stop the download
@@ -780,22 +822,57 @@ app.get('/api/internal/get-otp/:id', (req, res) => {
   });
 });
 
-// Download endpoint once pipeline is complete
+// Download endpoint once pipeline is complete - FIXED FOR MULTIPLE DOWNLOADS
 app.get('/api/download/:id', (req, res) => {
   const id = req.params.id;
   const info = requests[id];
   if (!info) return res.status(404).send('Not found');
   if (!info.done) return res.status(400).send('Not ready');
-  const filePath = info.filePath;
-  if (!filePath || !fs.existsSync(filePath)) return res.status(500).send('File not found');
+  let filePath = info.filePath; // Use let because we might change it in fallback
   
-  // NEW: Check if it's html and set appropriate headers
-  if (filePath.endsWith('.html')) {
-    res.setHeader('Content-Type', 'multipart/related');
-    res.setHeader('Content-Disposition', 'attachment; filename="alexa_voice_activity_report.html"');
+  // DEBUG: Log what file path we're trying to serve
+  console.log(`[${id}] Download requested, filePath: ${filePath}`);
+  
+  if (!filePath || !fs.existsSync(filePath)) {
+    console.log(`[${id}] File not found at path: ${filePath}`);
+    
+    // FALLBACK: Check if HTML report exists even if filePath wasn't set correctly
+    const htmlReportPath = path.join(__dirname, '..', 'smart_assistant_report.html');
+    if (fs.existsSync(htmlReportPath)) {
+      console.log(`[${id}] Serving fallback HTML report`);
+      filePath = htmlReportPath;
+    } else {
+      return res.status(500).send('File not found');
+    }
   }
   
-  res.download(filePath);
+  // Determine file type and set appropriate headers
+  if (filePath.endsWith('.html')) {
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('Content-Disposition', 'attachment; filename="smart_assistant_report.html"');
+    console.log(`[${id}] Serving HTML report: ${filePath}`);
+  } else if (filePath.endsWith('.json')) {
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="alexa_data.json"');
+    console.log(`[${id}] Serving JSON data: ${filePath}`);
+  } else {
+    // Default to download with original filename
+    const filename = path.basename(filePath);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  }
+  
+  res.sendFile(filePath, (err) => {
+    if (err) {
+      console.error(`[${id}] Error sending file:`, err);
+      return res.status(500).send('Error sending file');
+    }
+    
+    // NOTE: We don't delete the HTML file here anymore - it will be cleaned up when a new pipeline starts
+    console.log(`[${id}] File sent successfully`);
+    
+    // FIXED: Do NOT clean up the request from memory so multiple downloads work
+    // The request will be cleaned up when the user goes back to acquisition or starts a new one
+  });
 });
 
 const PORT = 5000;

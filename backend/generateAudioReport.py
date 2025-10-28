@@ -33,8 +33,8 @@ def parse_timestamp(timestamp_str):
     except Exception:
         return datetime.min
 
-def generate_html_report(audio_data_map, output_file="alexa_audio_report.html"):
-    """Generate a comprehensive HTML report with embedded audio"""
+def generate_html_report(audio_data_map, output_file="smart_assistant_report.html"):
+    """Generate a comprehensive HTML report with embedded audio - HANDLES 0 ACTIVITIES"""
     
     # Group by device
     devices_data = {}
@@ -63,6 +63,11 @@ def generate_html_report(audio_data_map, output_file="alexa_audio_report.html"):
     for device in devices_data:
         devices_data[device].sort(key=lambda x: x['timestamp_obj'], reverse=True)
     
+    # Calculate statistics
+    total_activities = sum(len(activities) for activities in devices_data.values())
+    total_audio = sum(1 for data in audio_data_map.values() if data.get('audio_info'))
+    total_devices = len(devices_data)
+    
     # Generate HTML
     html_content = f"""
     <!DOCTYPE html>
@@ -70,7 +75,7 @@ def generate_html_report(audio_data_map, output_file="alexa_audio_report.html"):
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Alexa Voice Activity Analysis Report</title>
+        <title>Amazon Smart Assistant Voice Activity Analysis Report</title>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
         <style>
             :root {{
@@ -341,6 +346,31 @@ def generate_html_report(audio_data_map, output_file="alexa_audio_report.html"):
                 font-size: 0.9rem;
             }}
             
+            .empty-state {{
+                text-align: center;
+                padding: 60px 40px;
+                color: var(--neutral-dark);
+            }}
+            
+            .empty-icon {{
+                font-size: 4rem;
+                margin-bottom: 20px;
+                opacity: 0.5;
+            }}
+            
+            .empty-title {{
+                font-size: 1.5rem;
+                margin-bottom: 15px;
+                color: var(--primary-light);
+            }}
+            
+            .empty-description {{
+                font-size: 1.1rem;
+                line-height: 1.6;
+                max-width: 600px;
+                margin: 0 auto;
+            }}
+            
             @media (max-width: 768px) {{
                 .container {{
                     padding: 15px;
@@ -367,7 +397,7 @@ def generate_html_report(audio_data_map, output_file="alexa_audio_report.html"):
     <body>
         <div class="container">
             <header class="report-header">
-                <h1 class="report-title">Alexa Voice Activity Analysis Report</h1>
+                <h1 class="report-title">Amazon Smart Assistant Voice Activity Analysis Report</h1>
                 <p class="report-subtitle">Comprehensive analysis of voice interactions and transcriptions</p>
                 
                 <div class="report-meta">
@@ -377,7 +407,7 @@ def generate_html_report(audio_data_map, output_file="alexa_audio_report.html"):
                     </div>
                     <div class="meta-item">
                         <span>Data Source:</span>
-                        <strong>Amazon Alexa Voice Recordings</strong>
+                        <strong>Amazon Smart Assistant Voice Recordings</strong>
                     </div>
                     <div class="meta-item">
                         <span>Report Type:</span>
@@ -387,11 +417,7 @@ def generate_html_report(audio_data_map, output_file="alexa_audio_report.html"):
             </header>
     """
     
-    # Add statistics
-    total_activities = sum(len(activities) for activities in devices_data.values())
-    total_audio = sum(1 for data in audio_data_map.values() if data.get('audio_info'))
-    total_devices = len(devices_data)
-    
+    # Add statistics - ALWAYS SHOW STATS EVEN FOR 0 ACTIVITIES
     html_content += f"""
             <section class="stats-grid">
                 <div class="stat-card">
@@ -413,85 +439,112 @@ def generate_html_report(audio_data_map, output_file="alexa_audio_report.html"):
             </section>
     """
     
-    # Add device sections
-    for device, activities in devices_data.items():
-        html_content += f"""
+    # Handle case when there are no activities
+    if total_activities == 0:
+        html_content += """
             <section class="device-section">
                 <header class="device-header">
-                    <div class="device-name">{device}</div>
-                    <div class="activity-count">{len(activities)} Activities</div>
+                    <div class="device-name">No Voice Activities Found</div>
+                    <div class="activity-count">0 Activities</div>
                 </header>
                 
-                <div class="activity-list">
-        """
-        
-        for idx, activity in enumerate(activities, 1):
-            # Audio section
-            audio_html = ""
-            if activity['audio_info']:
-                content_type = activity['audio_info']['content_type']
-                base64_data = activity['audio_info']['base64']
-                audio_html = f"""
-                    <div class="audio-section">
-                        <div class="audio-player">
-                            <audio controls>
-                                <source src="data:{content_type};base64,{base64_data}" type="{content_type}">
-                                Your browser does not support the audio element.
-                            </audio>
-                        </div>
+                <div class="empty-state">
+                    <div class="empty-icon">🎤</div>
+                    <h2 class="empty-title">No Amazon Smart Assistant Voice Activities Found</h2>
+                    <div class="empty-description">
+                        <p>No voice interactions were found in your Smart Assistant history for the selected time period (Last 7 days).</p>
+                        <p style="margin-top: 15px;">This could be because:</p>
+                        <ul style="text-align: left; max-width: 400px; margin: 20px auto;">
+                            <li>No voice commands were issued to Smart Assistant devices</li>
+                            <li>Activities are outside the 7-day search window</li>
+                            <li>Your account has voice history disabled</li>
+                            <li>Technical issues with data retrieval</li>
+                        </ul>
+                        <p>Try expanding your search timeframe or check your Smart Assistant privacy settings.</p>
                     </div>
-                """
-            else:
-                audio_html = """
-                    <div class="audio-section">
-                        <div class="no-audio">Audio recording not available for this interaction</div>
-                    </div>
-                """
-            
-            # Speaker section
-            speaker_html = ""
-            if activity['speaker'] and activity['speaker'] not in ['Unknown', 'undefined']:
-                speaker_html = f"""
-                    <div class="speaker-section">
-                        <div class="speaker-label">Identified Speaker</div>
-                        <div class="speaker-name">{activity['speaker']}</div>
-                    </div>
-                """
-            
-            html_content += f"""
-                    <div class="activity-item">
-                        <div class="activity-header">
-                            <div class="activity-timestamp">Recorded: {activity['timestamp']}</div>
-                        </div>
-                        
-                        {audio_html}
-                        
-                        <div class="transcript-section">
-                            <div class="transcript-label">Transcribed Content</div>
-                            <div class="transcript-content">
-                                {activity['transcript'] if activity['transcript'] else "No transcript available for this recording"}
-                            </div>
-                        </div>
-                        
-                        {speaker_html}
-                    </div>
-            """
-            
-            # Add subtle divider between activities (except for the last one)
-            if idx < len(activities):
-                html_content += '<div style="height: 1px; background: #e2e8f0; margin: 0 30px;"></div>'
-        
-        html_content += """
                 </div>
             </section>
         """
+    else:
+        # Add device sections when there are activities
+        for device, activities in devices_data.items():
+            html_content += f"""
+                <section class="device-section">
+                    <header class="device-header">
+                        <div class="device-name">{device}</div>
+                        <div class="activity-count">{len(activities)} Activities</div>
+                    </header>
+                    
+                    <div class="activity-list">
+            """
+            
+            for idx, activity in enumerate(activities, 1):
+                # Audio section
+                audio_html = ""
+                if activity['audio_info']:
+                    content_type = activity['audio_info']['content_type']
+                    base64_data = activity['audio_info']['base64']
+                    audio_html = f"""
+                        <div class="audio-section">
+                            <div class="audio-player">
+                                <audio controls>
+                                    <source src="data:{content_type};base64,{base64_data}" type="{content_type}">
+                                    Your browser does not support the audio element.
+                                </audio>
+                            </div>
+                        </div>
+                    """
+                else:
+                    audio_html = """
+                        <div class="audio-section">
+                            <div class="no-audio">Audio recording not available for this interaction</div>
+                        </div>
+                    """
+                
+                # Speaker section
+                speaker_html = ""
+                if activity['speaker'] and activity['speaker'] not in ['Unknown', 'undefined']:
+                    speaker_html = f"""
+                        <div class="speaker-section">
+                            <div class="speaker-label">Identified Speaker</div>
+                            <div class="speaker-name">{activity['speaker']}</div>
+                        </div>
+                    """
+                
+                html_content += f"""
+                        <div class="activity-item">
+                            <div class="activity-header">
+                                <div class="activity-timestamp">Recorded: {activity['timestamp']}</div>
+                            </div>
+                            
+                            {audio_html}
+                            
+                            <div class="transcript-section">
+                                <div class="transcript-label">Transcribed Content</div>
+                                <div class="transcript-content">
+                                    {activity['transcript'] if activity['transcript'] else "No transcript available for this recording"}
+                                </div>
+                            </div>
+                            
+                            {speaker_html}
+                        </div>
+                """
+                
+                # Add subtle divider between activities (except for the last one)
+                if idx < len(activities):
+                    html_content += '<div style="height: 1px; background: #e2e8f0; margin: 0 30px;"></div>'
+            
+            html_content += """
+                    </div>
+                </section>
+            """
     
     # Add footer
     html_content += f"""
             <div class="divider"></div>
             
             <footer class="report-footer">
-                <p>Confidential Report • Generated by Alexa Voice Analysis System</p>
+                <p>Confidential Report • Generated by Amazon Smart Assistant Voice Analysis System</p>
                 <p style="margin-top: 8px; font-size: 0.8rem;">
                     This report contains {total_activities} voice interactions across {total_devices} devices
                 </p>
@@ -533,6 +586,16 @@ def cleanup_audio_files(audio_data_map):
     else:
         print("No audio directory found to clean up")
 
+def cleanup_enhanced_file():
+    """Clean up enhanced_audio_transcripts.json after successful processing"""
+    enhanced_file = "enhanced_audio_transcripts.json"
+    try:
+        if os.path.exists(enhanced_file):
+            os.remove(enhanced_file)
+            print(f"🧹 Deleted: {enhanced_file}")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not clean up {enhanced_file}: {e}")
+
 def main():
     """Main function to generate comprehensive reports"""
     enhanced_file = "enhanced_audio_transcripts.json"
@@ -556,10 +619,14 @@ def main():
     print("Cleaning up temporary audio files...")
     cleanup_audio_files(audio_data_map)
     
+    # Clean up enhanced file after successful report generation
+    print("Cleaning up intermediate files...")
+    cleanup_enhanced_file()
+    
     print(f"\nREPORT GENERATION COMPLETE!")
     print(f"HTML Report: {html_file}")
     print(f"All audio files are embedded and accessible")
-    print(f"Temporary audio files have been cleaned up")
+    print(f"Temporary audio files and intermediate files have been cleaned up")
 
 if __name__ == "__main__":
     main()

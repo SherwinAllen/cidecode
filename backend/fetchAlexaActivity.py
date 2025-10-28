@@ -16,6 +16,9 @@ ALL_TRANSCRIPTS = []
 AUDIO_URLS_FILE = os.path.join("backend", "audio_urls.json")
 TRANSCRIPTS_FILE = "alexa_activity_log.txt"
 
+RETRY_SLEEP = 1 
+MAX_INITIAL_BATCH_ATTEMPTS = 3
+
 # Track audio URLs by activity
 activity_audio_map = {}
 audio_request_tracker = {}
@@ -769,13 +772,42 @@ with sync_playwright() as p:
     except Exception as e:
         print(f"⚠️  Date filter not applied: {e}")
 
-    # Wait for page to load activities (reduced)
-    print("⏳ Waiting for activities to load...")
-    time.sleep(1.5)  # Reduced from 3
+    # Wait for page to load activities — prefer retry if initial batch is zero
+    print("⏳ Checking for initial batch of activities...")
+    attempt = 1
+    activities = None
 
-    # Process all activities with optimized methods
+    while attempt <= MAX_INITIAL_BATCH_ATTEMPTS:
+        try:
+            activities = find_all_activities(page)
+            if activities:
+                try:
+                    count = activities.count()
+                except Exception:
+                    # If Playwright throws for any reason, treat as 0 and retry
+                    count = 0
+            else:
+                count = 0
+        except Exception:
+            count = 0
+
+        if count > 0:
+            print(f"✅ Found {count} activities on attempt {attempt}. Proceeding.")
+            break
+
+        # no activities found — decide next step
+        if attempt < MAX_INITIAL_BATCH_ATTEMPTS:
+            print(f"⚠️ No activities found on attempt {attempt}. Sleeping {RETRY_SLEEP}s and retrying...")
+            time.sleep(RETRY_SLEEP)
+            attempt += 1
+        else:
+            print(f"⚠️ No activities found after {MAX_INITIAL_BATCH_ATTEMPTS} attempts. Proceeding anyway.")
+            break
+
+    # Now start processing
     start_time = time.time()
     total_processed = continuous_load_and_process_optimized(page)
+
     end_time = time.time()
     processing_time = end_time - start_time
 

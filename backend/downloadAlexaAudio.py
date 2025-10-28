@@ -180,6 +180,16 @@ def validate_cookies(cookies_dict):
         print(f"❌ Cookie validation error: {e}")
         return False
 
+def cleanup_matched_file():
+    """Clean up matched_audio_transcripts.json after successful processing"""
+    matched_file = "matched_audio_transcripts.json"
+    try:
+        if os.path.exists(matched_file):
+            os.remove(matched_file)
+            print(f"🧹 Deleted: {matched_file}")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not clean up {matched_file}: {e}")
+
 def process_all_audio_files():
     """Process all audio URLs from the matched transcripts with guaranteed success"""
     # Load cookies
@@ -248,7 +258,10 @@ def process_all_audio_files():
     print(f"   🔄 Retry successes: {retry_successes}")
     print(f"   ❌ Failed downloads: {failed_downloads}")
     print(f"   📊 Total processed: {len(matched_data)}")
-    print(f"   🎯 Success rate: {(successful_downloads/len(matched_data))*100:.1f}%")
+    try:
+        print(f"   🎯 Success rate: {(successful_downloads/len(matched_data))*100:.1f}%")
+    except ZeroDivisionError:
+        pass
     
     # Save the enhanced data
     output_file = "enhanced_audio_transcripts.json"
@@ -256,6 +269,10 @@ def process_all_audio_files():
         json.dump(audio_data_map, f, indent=2, ensure_ascii=False)
     
     print(f"💾 Enhanced data saved to: {output_file}")
+    
+    # Clean up matched file after successful processing
+    print(f"\n🧹 Cleaning up intermediate files...")
+    cleanup_matched_file()
     
     # Final validation
     if failed_downloads > 0:
