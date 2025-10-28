@@ -1,18 +1,129 @@
 const express = require('express');
 const cors = require('cors');
 const app = express();
+const { MongoClient, GridFSBucket } = require('mongodb');
 const path = require('path');
 const { exec, spawn } = require('child_process');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const tar = require('tar-stream');
 
-
 app.use(cors());
 app.use(express.json());
 
 // Serve static files from the backup directory
 app.use('/api/files', express.static(path.join(__dirname, 'backup')));
+
+
+const mongoURI = "mongodb://localhost:27017/forensic_evidence";
+let db, gfs;
+
+const connectDB = async () => {
+  try {
+    const client = await MongoClient.connect(mongoURI);
+    db = client.db();
+    gfs = new GridFSBucket(db, { bucketName: 'fs' });
+    console.log('✅ Connected to MongoDB');
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error);
+    process.exit(1);
+  }
+};
+
+
+// === Express Setup ===
+connectDB()
+// Serve static files from the backup directory
+app.use('/api/files', express.static(path.join(__dirname, 'backup')));
+
+// === MongoDB Artifact Routes ===
+app.get("/", (req, res) => {
+  res.json({ message: "Forensic Artifact Express API is running" });
+});
+
+app.get("/artifacts", async (req, res) => {
+  /** List all stored artifacts. */
+  try {
+    const files = await db.collection('fs.files')
+      .find()
+      .sort({ uploadDate: -1 })
+      .toArray();
+    
+    const result = files.map(f => ({
+      filename: f.filename,
+      uploadDate: f.uploadDate.toISOString(),
+      size: f.length
+    }));
+    
+    res.json({ artifacts: result });
+  } catch (error) {
+    console.error('Error listing artifacts:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/artifact/content/:filename", async (req, res) => {
+  /** Return the text content of a file for preview. */
+  try {
+    const { filename } = req.params;
+    const file = await db.collection('fs.files').findOne({ filename });
+    
+    if (!file) {
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    const downloadStream = gfs.openDownloadStreamByName(filename);
+    let data = '';
+    
+    downloadStream.on('data', (chunk) => {
+      data += chunk.toString('utf8');
+    });
+    
+    downloadStream.on('end', () => {
+      res.json({ filename, content: data });
+    });
+    
+    downloadStream.on('error', (error) => {
+      console.error('Error reading file:', error);
+      res.status(500).json({ error: error.message });
+    });
+    
+  } catch (error) {
+    console.error('Error getting artifact content:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/artifact/download/:filename", async (req, res) => {
+  /** Download the full file. */
+  try {
+    const { filename } = req.params;
+    console.log(`Download request for: ${filename}`);
+    
+    const file = await db.collection('fs.files').findOne({filename});
+    if (!file) {
+      return res.status(404).json({ error: "File not found" });
+    }
+    
+    console.log("File found:", filename);
+    
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    
+    const downloadStream = gfs.openDownloadStreamByName(filename);
+    downloadStream.pipe(res);
+    
+    downloadStream.on('error', (error) => {
+      console.error('Error downloading file:', error);
+      res.status(500).json({ error: error.message });
+    });
+    
+  } catch (error) {
+    console.error('Error in download endpoint:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 // Download file from device
 app.get('/api/download-file', async (req, res) => {
@@ -322,14 +433,6 @@ app.get('/api/scan-folders', async (req, res) => {
       }
     }
     
-    //Always include these common folders if they exist
-    const commonFolders = ['DCIM', 'Download', 'Pictures', 'Music', 'Documents', 'Movies'];
-    for (const folder of commonFolders) {
-      if (!folderNames.includes(folder)) {
-        folderNames.push(folder);
-      }
-    }
-    
     console.log(`✅ Found ${folderNames.length} folders:`, folderNames);
     res.json(folderNames);
   } catch (err) {
@@ -525,7 +628,7 @@ app.get('/api/packet-report', async (req, res) => {
   }
 });
 
-app.get('/api/download/:fileName', (req, res) => {
+app.get('/api/download/fileName', (req, res) => {
   const fileName = req.params.fileName;
   const filePath = path.join(__dirname, '..', fileName);
 

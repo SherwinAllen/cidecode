@@ -115,3 +115,11 @@ backend/audio_urls.json
 *.txt
 *.docx
 *.csv
+*.tar
+
+/downloads/*
+/sdcard/*
+/summaries/*
+/test/* 
+
+packet_report.json
