@@ -17,7 +17,17 @@ export const MatrixBackground = () => {
     const latin = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     const nums = '0123456789';
     const alphabet = katakana + latin + nums;
+    
+    const updateCanvasSize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = Math.max(
+        document.body.scrollHeight,
+        document.documentElement.scrollHeight,
+        window.innerHeight
+      );
+    };
 
+    updateCanvasSize();
     function draw() {
       ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
       ctx.fillRect(0, 0, width, height);

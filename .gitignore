@@ -107,3 +107,19 @@ backend/auth-error-*
 backend/cookies.json
 backend/chrome-user-data/
 backend/audio_urls.json
+
+
+# -----------------------
+# any text file generated from running the scripts
+# -----------------------
+*.txt
+*.docx
+*.csv
+*.tar
+
+/downloads/*
+/sdcard/*
+/summaries/*
+/test/* 
+
+packet_report.json
