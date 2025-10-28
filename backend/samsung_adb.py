@@ -65,7 +65,8 @@ def create_json_summary():
         "sensor_data.txt",
         "dumpsys_location.txt",
         "keystore_information.txt",
-        "trust_information.txt"
+        "trust_information.txt",
+        "notification_information.txt"
     ]
     
     artifacts_summary = {}
@@ -162,6 +163,14 @@ def trust_info():
     trust_data, _ = run_adb_command(['shell', 'dumpsys', 'trust'])
     save_to_file("trust_information.txt", trust_data)
 
+def notification_info():
+    """Collect notification-related information from the device."""
+    notif_data, err = run_adb_command(['shell', 'dumpsys', 'notification'], timeout=60)
+    if notif_data:
+        save_to_file("notification_information.txt", notif_data)
+    else:
+        save_to_file("notification_information.txt", f"Error or empty output: {err}")
+
 def main():
     if not check_adb_device():
         print("[-] No ADB device connected.")
@@ -180,6 +189,7 @@ def main():
     extract_activity_info()
     keystore_info()
     trust_info()
+    notification_info()
     create_json_summary()
 
     

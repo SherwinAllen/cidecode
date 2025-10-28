@@ -553,10 +553,10 @@ log_files = {
 def generate_forensic_report(output_dir="downloads"):
     """Generates the forensic .docx report using MongoDB data."""
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, "Forensic_Log_Report.docx")
+    output_path = os.path.join(output_dir, "Preliminary_Forensic_Report.docx")
 
     doc = docx.Document()
-    doc.add_paragraph("Forensic Log Report", style='Title')
+    doc.add_paragraph("Preliminary Forensic Report", style='Title')
     
     
     # --- Account Info ---
