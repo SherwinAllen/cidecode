@@ -24,12 +24,14 @@ if not AMAZON_EMAIL or not AMAZON_PASSWORD:
     print('Error: Please set AMAZON_EMAIL and AMAZON_PASSWORD environment variables.')
     sys.exit(1)
 
-# NEW: Real-time server communication functions
+# NEW: Real-time server communication functions - OPTIMIZED: Only send critical updates
 def update_server_status(method=None, message=None, current_url=None, error_type=None, otp_error=None, show_otp_modal=None):
-    """Send real-time status updates to the Node.js server"""
+    """Send real-time status updates to the Node.js server - OPTIMIZED: Only critical updates"""
     request_id = os.environ.get('REQUEST_ID')
     if not request_id:
-        print(f"⚠️ No REQUEST_ID found, skipping server update: {message}")
+        # In manual mode, just print to console
+        if message:
+            print(f"ℹ️ {message}")
         return
     
     try:
@@ -47,15 +49,27 @@ def update_server_status(method=None, message=None, current_url=None, error_type
         if show_otp_modal is not None:
             payload['showOtpModal'] = show_otp_modal
         
-        response = requests.post(
-            f'http://localhost:5000/api/internal/2fa-update/{request_id}',
-            json=payload,
-            timeout=5
+        # Only send updates for critical events to reduce noise
+        should_send = (
+            error_type is not None or
+            show_otp_modal is not None or
+            (method and ('OTP' in method or 'Push' in method)) or
+            (message and any(keyword in message for keyword in [
+                'error', 'Error', 'failed', 'Failed', 'successful', 'Successful',
+                '2FA', 'authentication', 'OTP', 'Push', 'cancelled', 'complete'
+            ]))
         )
-        if response.status_code == 200:
-            print(f"✅ Status update sent to server: {message}")
-        else:
-            print(f"⚠️ Failed to send status update: {response.status_code}")
+        
+        if should_send:
+            response = requests.post(
+                f'http://localhost:5000/api/internal/2fa-update/{request_id}',
+                json=payload,
+                timeout=5
+            )
+            if response.status_code == 200:
+                print(f"✅ Status update sent: {message}")
+            else:
+                print(f"⚠️ Failed to send status update: {response.status_code}")
     except Exception as e:
         print(f"⚠️ Could not connect to server: {e}")
 
@@ -590,7 +604,7 @@ def handle_otp_authentication(driver, context='full_auth'):
                     if 'INVALID_OTP' in str(error):
                         print('❌ OTP verification failed')
                         update_server_status(
-                            message='OTP verification failed',
+                            message='OTP verification failed, please try again...',
                             error_type='INVALID_OTP',
                             otp_error='The code you entered is not valid. Please check the code and try again.',
                             show_otp_modal=True
@@ -627,7 +641,7 @@ def handle_otp_authentication(driver, context='full_auth'):
     # Final redirection check
     if not is_on_target_page(driver):
         print('🔄 Waiting for final redirection after OTP...')
-        update_server_status(message='Waiting for final authentication...')
+        # update_server_status(message='Waiting for final authentication...')
         success = wait_for_redirect_after_2fa(driver)
         if not success:
             update_server_status(
@@ -718,16 +732,16 @@ def wait_for_redirect_after_2fa(driver, timeout=180):
         raise error
 
 def perform_full_authentication(driver):
-    """Perform full authentication with real-time server updates"""
+    """Perform full authentication with real-time server updates - OPTIMIZED: Reduced status updates"""
     try:
         print('Starting full authentication process...')
-        update_server_status(message='Starting authentication process...')
+        update_server_status(message='Verifying Account Credentials...')
         
         if is_manual_mode():
             print('🔧 MANUAL MODE: You may need to complete authentication steps in the browser')
-            update_server_status(message='Manual mode detected - complete authentication in browser')
+            # Don't send server update for manual mode - not critical for frontend
 
-        # Email step
+        # Email step - only send critical updates
         email_filled = False
         try:
             email_selectors = ['#ap_email', 'input[name="email"]', 'input[type="email"]']
@@ -738,7 +752,6 @@ def perform_full_authentication(driver):
                         element.clear()
                         element.send_keys(AMAZON_EMAIL)
                         email_filled = True
-                        update_server_status(message='Email entered successfully')
                         
                         continue_selectors = ['input#continue', 'button#continue', 'input[name="continue"]']
                         for cont_sel in continue_selectors:
@@ -759,10 +772,8 @@ def perform_full_authentication(driver):
 
         if not email_filled:
             print('⚠️ Could not find email field, checking if already on password page...')
-            update_server_status(message='Checking authentication state...')
 
         time.sleep(2)
-        update_server_status(current_url=driver.current_url)
 
         # Check for email errors
         email_error = check_for_auth_errors(driver)
@@ -773,7 +784,7 @@ def perform_full_authentication(driver):
             )
             raise Exception('INVALID_EMAIL')
         
-        # Password step
+        # Password step - only send critical updates
         password_filled = False
         try:
             pass_selectors = ['#ap_password', 'input[name="password"]', 'input[type="password"]']
@@ -784,7 +795,6 @@ def perform_full_authentication(driver):
                         element.clear()
                         element.send_keys(AMAZON_PASSWORD)
                         password_filled = True
-                        update_server_status(message='Password entered successfully')
                         
                         sign_selectors = ['input#signInSubmit', 'button#signInSubmit', 'button[name="signIn"]', 'input[type="submit"]']
                         for sign_sel in sign_selectors:
@@ -805,10 +815,8 @@ def perform_full_authentication(driver):
 
         if not password_filled:
             print('⚠️ Could not find password field, checking current authentication state...')
-            update_server_status(message='Checking password authentication state...')
 
         time.sleep(3)
-        update_server_status(current_url=driver.current_url)
 
         # Check for authentication errors
         auth_error = check_for_auth_errors(driver)
@@ -831,7 +839,7 @@ def perform_full_authentication(driver):
             )
             raise Exception('UNKNOWN_2FA_PAGE')
         
-        # Handle 2FA
+        # Handle 2FA - this is critical, so send updates
         if is_on_2fa_page(driver):
             method = detect_2fa_method(driver)
             print(f'🔐 2FA detected -> {method}')
@@ -878,7 +886,7 @@ def perform_full_authentication(driver):
                     raise Exception('Push notification approval failed or timed out')
         else:
             print('✅ No 2FA required, proceeding with standard authentication...')
-            update_server_status(message='No 2FA required, proceeding...')
+            # Don't send server update for this - not critical
 
         on_target = is_on_target_page(driver)
         if not on_target:
@@ -906,18 +914,17 @@ def perform_full_authentication(driver):
         return False
 
 def handle_re_auth(driver):
-    """Enhanced re-authentication with real-time server updates"""
+    """Enhanced re-authentication with real-time server updates - OPTIMIZED: Reduced status updates"""
     try:
         print('🔄 Starting re-authentication process...')
         update_server_status(message='Starting re-authentication process...')
         
         if is_manual_mode():
             print('🔧 MANUAL MODE: You may need to complete re-authentication in the browser')
-            update_server_status(message='Manual mode detected for re-authentication')
+            # Don't send server update for manual mode
 
-        # Try fill password
+        # Try fill password - only send critical updates
         print('🔑 Entering password for re-authentication...')
-        update_server_status(message='Entering password for re-authentication...')
         password_filled = False
         try:
             pass_selectors = ['#ap_password', 'input[name="password"]', 'input[type="password"]']
@@ -929,7 +936,6 @@ def handle_re_auth(driver):
                         element.send_keys(AMAZON_PASSWORD)
                         password_filled = True
                         print('✅ Password entered successfully')
-                        update_server_status(message='Password entered successfully for re-authentication')
                         
                         # Click sign-in
                         sign_selectors = ['input#signInSubmit', 'button#signInSubmit', 'button[name="signIn"]', 'input[type="submit"]']
@@ -952,10 +958,8 @@ def handle_re_auth(driver):
         
         if not password_filled:
             print('⚠️ Could not find password field during re-auth')
-            update_server_status(message='Could not find password field during re-authentication')
-        
+
         time.sleep(2)
-        update_server_status(current_url=driver.current_url)
         
         # NEW: Check for authentication errors after submitting password
         print('🔍 Checking for re-authentication errors...')
@@ -973,7 +977,6 @@ def handle_re_auth(driver):
             )
             raise Exception('UNKNOWN_2FA_PAGE')
         print('✅ Re-authentication validation passed')
-        update_server_status(message='Re-authentication validation passed')
         
         # If 2FA appears after re-auth, handle same as full auth
         if is_on_2fa_page(driver):
@@ -1026,7 +1029,6 @@ def handle_re_auth(driver):
                     raise Exception('Push notification approval failed during re-auth')
         
         print('🔍 Verifying re-authentication success...')
-        update_server_status(message='Verifying re-authentication success...')
         on_target = is_on_target_page(driver)
         if not on_target:
             print(f'❌ Not on target page after re-auth. Current URL: {driver.current_url}')
@@ -1070,7 +1072,7 @@ def setup_signal_handlers(driver):
     signal.signal(signal.SIGINT, cleanup)
 
 def main():
-    """OPTIMIZED MAIN EXECUTION FLOW with real-time server communication"""
+    """OPTIMIZED MAIN EXECUTION FLOW with real-time server communication - CLEANER LOGGING"""
     driver = None
     
     try:
@@ -1136,7 +1138,7 @@ def main():
         
         if is_manual_mode():
             print('🔧 RUNNING IN MANUAL TEST MODE')
-            update_server_status(message='Running in manual test mode')
+            # Don't send server update for manual mode
         else:
             print('🚀 RUNNING IN AUTOMATED PIPELINE MODE')
             update_server_status(message='Running in automated pipeline mode')
@@ -1146,20 +1148,19 @@ def main():
         update_server_status(message='Navigating to Alexa activity page...', current_url=activity_url)
         driver.get(activity_url)
         time.sleep(5)
-        update_server_status(current_url=driver.current_url)
 
         need_final_navigation = False
         
         # Step 2: Check authentication state
         print('2. Checking authentication state...')
-        update_server_status(message='Checking authentication state...')
+        # update_server_status(message='Checking authentication state...')
         
         if is_on_target_page(driver):
             print('✅ Already on target page!')
             update_server_status(message='Already authenticated on target page')
         elif needs_full_login(driver):
             print('🔐 Full authentication required...')
-            update_server_status(message='Full authentication required...')
+            # update_server_status(message='Full authentication required...')
             auth_result = perform_full_authentication(driver)
             if not auth_result:
                 # Error handling already done in perform_full_authentication
@@ -1167,7 +1168,7 @@ def main():
             need_final_navigation = True
         elif is_true_re_auth_scenario(driver):
             print('🔄 Re-authentication required...')
-            update_server_status(message='Re-authentication required...')
+            # update_server_status(message='Re-authentication required...')
             re_auth_success = handle_re_auth(driver)
             
             if not re_auth_success or not is_on_target_page(driver):
@@ -1177,7 +1178,7 @@ def main():
                     return
                 
                 print('❌ Re-authentication failed, trying full authentication...')
-                update_server_status(message='Re-authentication failed, trying full authentication...')
+                # update_server_status(message='Re-authentication failed, trying full authentication...')
                 full_auth_result = perform_full_authentication(driver)
                 if not full_auth_result:
                     # Error details already sent to server
@@ -1185,7 +1186,7 @@ def main():
                 need_final_navigation = True
         else:
             print('❓ Unknown state, assuming full authentication is needed...')
-            update_server_status(message='Unknown authentication state, attempting full authentication...')
+            # update_server_status(message='Unknown authentication state, attempting full authentication...')
             auth_result = perform_full_authentication(driver)
             if not auth_result:
                 # Error details already sent to server
@@ -1198,7 +1199,6 @@ def main():
             update_server_status(message='Final navigation to target page...')
             driver.get(activity_url)
             time.sleep(5)
-            update_server_status(current_url=driver.current_url)
         else:
             print('3. Already on target page, skipping navigation.')
             update_server_status(message='Already on target page')
@@ -1206,7 +1206,7 @@ def main():
         # Final verification
         if is_on_target_page(driver):
             print('✅ Successfully reached Alexa activity page!')
-            update_server_status(message='Successfully reached Alexa activity page! Authentication complete.')
+            # update_server_status(message='Successfully reached Alexa activity page! Authentication complete.')
             
             # Save cookies
             cookies = driver.get_cookies()
@@ -1217,7 +1217,7 @@ def main():
                 json.dump(cookies, f, indent=2)
             
             print(f'💾 Cookies have been written to {output_cookies_path}')
-            update_server_status(message='Cookies generated successfully. Pipeline can continue.')
+            # update_server_status(message='Cookies generated successfully. Pipeline can continue.')
         else:
             print('❌ Failed to reach Alexa activity page')
             current_url = driver.current_url
@@ -1245,7 +1245,7 @@ def main():
             )
         elif 'INVALID_OTP' in str(error):
             update_server_status(
-                message='OTP verification failed',
+                message='OTP verification failed, please try again...',
                 error_type='INVALID_OTP'
             )
         elif 'PUSH_NOTIFICATION_DENIED' in str(error):

@@ -14,7 +14,6 @@ app.use(express.json());
 // Serve static files from the backup directory
 app.use('/api/files', express.static(path.join(__dirname, 'backup')));
 
-
 // Use MONGO_URI from env (set by docker-compose) or fallback to localhost
 const mongoURI = process.env.MONGO_URI || process.env.MONGO_URL || "mongodb://localhost:27017/forensic_evidence";
 let db, gfs, mongoClient;
@@ -119,7 +118,6 @@ app.get("/artifact/download/:filename", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 
 // Download file from device
 app.get('/api/download-file', async (req, res) => {
@@ -710,7 +708,11 @@ app.post('/api/packet-report', (req, res) => {
     showOtpModal: false,
     otpError: null,
     // NEW: Track child processes for cancellation
-    childProcesses: []
+    childProcesses: [],
+    // FIXED: Simplified OTP tracking
+    otpRetryCount: 0,
+    maxOtpRetries: 3,
+    authCompleted: false
   };
 
   // respond immediately with requestId so frontend can show UI
@@ -719,14 +721,22 @@ app.post('/api/packet-report', (req, res) => {
   // Helper function to add logs and update progress
   const addLog = (message, progress = null) => {
     if (requests[requestId]) {
-      requests[requestId].logs.push({
-        timestamp: new Date().toISOString(),
-        message: message
-      });
-      if (progress !== null) {
-        requests[requestId].progress = progress;
+      // Only add log if it's different from the last one to avoid duplicates
+      const lastLog = requests[requestId].logs[requests[requestId].logs.length - 1];
+      if (!lastLog || lastLog.message !== message) {
+        const newLog = {
+          timestamp: new Date().toISOString(),
+          message: message
+        };
+        requests[requestId].logs.push(newLog);
+        
+        // Update progress if provided
+        if (progress !== null) {
+          requests[requestId].progress = progress;
+        }
+        
+        console.log(`[${requestId}] LOG: ${message}`);
       }
-      console.log(`[${requestId}] ${message}`);
     }
   };
 
@@ -737,7 +747,7 @@ app.post('/api/packet-report', (req, res) => {
     }
   };
 
-  // NEW: Enhanced cancelPipeline function to handle user cancellation
+  // FIXED: Enhanced cancelPipeline function with proper state cleanup
   const cancelPipeline = async (errorType, errorMessage) => {
     if (requests[requestId]) {
       console.log(`[${requestId}] Cancelling pipeline due to: ${errorType}`);
@@ -746,7 +756,7 @@ app.post('/api/packet-report', (req, res) => {
       if (requests[requestId].logs) {
         requests[requestId].logs.push({
           timestamp: new Date().toISOString(),
-          message: 'Data acquisition cancelled by user. Cleaning up...'
+          message: 'Data acquisition cancelled. Cleaning up...'
         });
       }
       
@@ -805,6 +815,39 @@ app.post('/api/packet-report', (req, res) => {
     }
   };
 
+  // FIXED: COMPLETELY REWRITTEN OTP handling
+  const handleOtpSuccess = () => {
+    if (requests[requestId]) {
+      console.log(`[${requestId}] OTP verification successful, clearing all error states`);
+      requests[requestId].errorType = null;
+      requests[requestId].otpError = null;
+      requests[requestId].showOtpModal = false;
+      requests[requestId].otpRetryCount = 0; // Reset retry count on success
+      addLog('OTP verification successful! Continuing data extraction...', 50);
+    }
+  };
+
+  const handleOtpFailure = () => {
+    if (requests[requestId]) {
+      // Check if we've exceeded max retries
+      if (requests[requestId].otpRetryCount >= requests[requestId].maxOtpRetries) {
+        cancelPipeline('MAX_OTP_RETRIES_EXCEEDED', 'Maximum OTP retry attempts exceeded');
+        addLog('Too many failed OTP attempts. Please try again later.', null);
+        return;
+      }
+      
+      // For OTP failures, reset state for retry
+      requests[requestId].otpRetryCount += 1;
+      requests[requestId].errorType = 'INVALID_OTP';
+      requests[requestId].otpError = 'The code you entered is not valid. Please check the code and try again.';
+      requests[requestId].showOtpModal = true;
+      requests[requestId].status = 'waiting_for_2fa';
+      
+      console.log(`[${requestId}] OTP verification failed (attempt ${requests[requestId].otpRetryCount})`);
+      addLog(`OTP verification failed. Please enter the correct code. (Attempt ${requests[requestId].otpRetryCount} of ${requests[requestId].maxOtpRetries})`, null);
+    }
+  };
+
   // run background pipeline for this request
   (async () => {
     const cookiesScript = path.join(__dirname, 'generateCookies.py');
@@ -824,17 +867,18 @@ app.post('/api/packet-report', (req, res) => {
       // Step 1: Generating cookies
       requests[requestId].step = 'cookies';
       requests[requestId].status = 'running';
-      addLog('Establishing secure connection and verifying account credentials...', 10);
+      addLog('Establishing secure connection...', 10);
 
       // spawn node script (so we can capture exit and not block main thread)
       const child = spawn('python', [cookiesScript], { env, stdio: ['ignore', 'pipe', 'pipe'] });
       
-      // NEW: Track child process for potential cancellation
+      // Track child process for potential cancellation
       requests[requestId].childProcesses.push(child);
 
       let cookieOutput = '';
       let cookieError = '';
       
+      // FIXED: COMPLETELY REWRITTEN stdout handler with proper OTP state management
       child.stdout.on('data', (d) => {
         const data = d.toString();
         cookieOutput += data;
@@ -845,66 +889,58 @@ app.post('/api/packet-report', (req, res) => {
           updateCurrentUrl(urlMatch[1]);
         }
         
-        // SIMPLIFIED: Only log specific key events with proper timing
-        if (data.includes('2FA detected')) {
-          addLog('Two-factor authentication required...', 35);
+        // FIXED: Process authentication events in order of priority
+        if (data.includes('Successfully reached Alexa activity page') || data.includes('Authentication completed successfully')) {
+          if (!requests[requestId].authCompleted) {
+            updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
+            addLog('Authentication completed successfully', 50);
+            requests[requestId].authCompleted = true;
+            // Clear any OTP error state when auth completes successfully
+            requests[requestId].errorType = null;
+            requests[requestId].otpError = null;
+            requests[requestId].showOtpModal = false;
+          }
         }
-        if (data.includes('Push notification page')) {
+        // FIXED: OTP SUCCESS must be checked BEFORE OTP failure
+        else if (data.includes('OTP authentication completed successfully') || data.includes('OTP verification successful')) {
+          handleOtpSuccess();
+        }
+        // FIXED: Push notification events
+        else if (data.includes('Push notification page') && !requests[requestId].authCompleted) {
           addLog('Push notification sent to your device. Please approve to continue...', 40);
         }
-        if (data.includes('Secure connection established')) {
+        else if (data.includes('Secure connection established') && !requests[requestId].authCompleted) {
           addLog('Secure connection established successfully', 45);
         }
-        // Detect when we've successfully reached the target page
-        if (data.includes('Successfully reached Alexa activity page')) {
-          updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
+        // FIXED: OTP FAILURE must be checked after success
+        else if ((data.includes('OTP verification failed') || data.includes('INVALID_OTP'))) {
+          handleOtpFailure();
         }
-
-        // In the cookie script stdout handler, add this condition:
-        if (data.includes('OTP authentication completed successfully')) {
-          // Clear any OTP error state since authentication succeeded
-          requests[requestId].errorType = null;
-          requests[requestId].otpError = null;
-          requests[requestId].showOtpModal = false;
-          addLog('OTP verification successful! Continuing data extraction...', 50);
-        }
-        // NEW: Detect authentication errors from the cookie script and CANCEL PIPELINE
-        if (data.includes('INVALID_EMAIL')) {
+        // FIXED: Other authentication errors
+        else if (data.includes('INVALID_EMAIL')) {
           cancelPipeline('INVALID_EMAIL', 'Invalid email address provided');
           addLog('The email address is not associated with an Amazon account. Please check your email and try again.', null);
           return;
         }
-        if (data.includes('INCORRECT_PASSWORD')) {
+        else if (data.includes('INCORRECT_PASSWORD')) {
           cancelPipeline('INCORRECT_PASSWORD', 'Incorrect password provided');
           addLog('The password is incorrect. Please check your password and try again.', null);
           return;
         }
-        if (data.includes('Push notification was denied')) {
+        else if (data.includes('Push notification was denied')) {
           cancelPipeline('PUSH_DENIED', 'Push notification was denied');
           addLog('Sign in attempt was denied from your device. Please try again and approve the notification.', null);
           return;
         }
-        // NEW: Detect unknown 2FA page
-        if (data.includes('UNKNOWN_2FA_PAGE') || data.includes('Unknown 2FA page detected')) {
+        else if (data.includes('UNKNOWN_2FA_PAGE') || data.includes('Unknown 2FA page detected')) {
           cancelPipeline('UNKNOWN_2FA_PAGE', 'Unknown 2FA page detected');
           addLog('This account has been accessed too many times with this account. Please try again tomorrow.', null);
           return;
         }
-        // NEW: Detect unexpected errors from the cookie script
-        if (data.includes('UNEXPECTED_ERROR') || data.includes('An unexpected error occurred during authentication')) {
+        else if (data.includes('UNEXPECTED_ERROR') || data.includes('An unexpected error occurred during authentication')) {
           cancelPipeline('GENERIC_ERROR', 'An unexpected error occurred during authentication. Please try again.');
           addLog('An unexpected error occurred during authentication. Please try again.', null);
           return;
-        }
-        // FIX: Only detect OTP verification failure if we're still in OTP context
-        if ((data.includes('OTP verification failed') || data.includes('INVALID_OTP')) && 
-            !data.includes('OTP authentication completed successfully')) {
-          // For OTP failures, we don't cancel immediately - allow retry
-          requests[requestId].errorType = 'INVALID_OTP';
-          requests[requestId].status = 'waiting_for_2fa';
-          requests[requestId].showOtpModal = true;
-          requests[requestId].otpError = 'The code you entered is not valid. Please check the code and try again.';
-          addLog('OTP verification failed. Please enter the correct code.', null);
         }
       });
       
@@ -913,93 +949,60 @@ app.post('/api/packet-report', (req, res) => {
         cookieError += errorData;
         console.error(`[${requestId}] cookies stderr: ${errorData}`);
         
-        // NEW: Also check stderr for authentication errors and CANCEL PIPELINE
-        if (errorData.includes('INVALID_EMAIL')) {
-          cancelPipeline('INVALID_EMAIL', 'Invalid email address provided');
-          addLog('The email address is not associated with an Amazon account. Please check your email and try again.', null);
-          return;
+        // FIXED: Same logic for stderr but don't cancel pipeline from stderr alone
+        if (errorData.includes('Successfully reached Alexa activity page') || errorData.includes('Authentication completed successfully')) {
+          if (!requests[requestId].authCompleted) {
+            updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
+            addLog('Authentication completed successfully', 50);
+            requests[requestId].authCompleted = true;
+            requests[requestId].errorType = null;
+            requests[requestId].otpError = null;
+            requests[requestId].showOtpModal = false;
+          }
         }
-        if (errorData.includes('INCORRECT_PASSWORD')) {
-          cancelPipeline('INCORRECT_PASSWORD', 'Incorrect password provided');
-          addLog('The password is incorrect. Please check your password and try again.', null);
-          return;
+        else if (errorData.includes('OTP authentication completed successfully') || errorData.includes('OTP verification successful')) {
+          handleOtpSuccess();
         }
-        if (errorData.includes('Push notification was denied')) {
-          cancelPipeline('PUSH_DENIED', 'Push notification was denied');
-          addLog('Sign in attempt was denied from your device. Please try again and approve the notification.', null);
-          return;
-        }
-        // NEW: Detect unknown 2FA page
-        if (errorData.includes('UNKNOWN_2FA_PAGE') || errorData.includes('Unknown 2FA page detected')) {
-          cancelPipeline('UNKNOWN_2FA_PAGE', 'Unknown 2FA page detected');
-          addLog('This account has been accessed too many times with this account. Please try again tomorrow.', null);
-          return;
-        }
-        // NEW: Detect unexpected errors
-        if (errorData.includes('UNEXPECTED_ERROR') || errorData.includes('An unexpected error occurred during authentication')) {
-          cancelPipeline('GENERIC_ERROR', 'An unexpected error occurred during authentication. Please try again.');
-          addLog('An unexpected error occurred during authentication. Please try again.', null);
-          return;
-        }
-        // FIX: Only detect OTP verification failure if we're still in OTP context
-        if ((errorData.includes('OTP verification failed') || errorData.includes('INVALID_OTP')) && 
-            !errorData.includes('OTP authentication completed successfully')) {
-          // For OTP failures, we don't cancel immediately - allow retry
-          requests[requestId].errorType = 'INVALID_OTP';
-          requests[requestId].status = 'waiting_for_2fa';
-          requests[requestId].showOtpModal = true;
-          requests[requestId].otpError = 'The code you entered is not valid. Please check the code and try again.';
-          addLog('OTP verification failed. Please enter the correct code.', null);
+        else if ((errorData.includes('OTP verification failed') || errorData.includes('INVALID_OTP'))) {
+          handleOtpFailure();
         }
       });
 
       const exitCode = await new Promise((resolve) => child.on('close', resolve));
       
-      // NEW: Remove child from tracking after it closes
+      // Remove child from tracking after it closes
       requests[requestId].childProcesses = requests[requestId].childProcesses.filter(cp => cp !== child);
       
-      // NEW: Check if pipeline was cancelled due to authentication error
+      // FIXED: Simplified pipeline continuation logic
       if (requests[requestId].errorType && 
-          ['INVALID_EMAIL', 'INCORRECT_PASSWORD', 'PUSH_DENIED', 'UNKNOWN_2FA_PAGE', 'CANCELLED'].includes(requests[requestId].errorType)) {
-        console.log(`[${requestId}] Pipeline cancelled due to authentication error: ${requests[requestId].errorType}`);
-        return; // Stop the pipeline completely
-      }
-      
-      // NEW: Check for authentication errors after process completion
-      if (requests[requestId].errorType === 'INVALID_EMAIL' || 
-          requests[requestId].errorType === 'INCORRECT_PASSWORD' ||
-          requests[requestId].errorType === 'PUSH_DENIED' ||
-          requests[requestId].errorType === 'UNKNOWN_2FA_PAGE' ||
-          requests[requestId].errorType === 'CANCELLED') {
-        // Authentication error already handled above, just return early
+          ['INVALID_EMAIL', 'INCORRECT_PASSWORD', 'PUSH_DENIED', 'UNKNOWN_2FA_PAGE', 'MAX_OTP_RETRIES_EXCEEDED', 'CANCELLED'].includes(requests[requestId].errorType)) {
+        console.log(`[${requestId}] Pipeline cancelled due to error: ${requests[requestId].errorType}`);
         return;
       }
       
-      if (exitCode !== 0 && !requests[requestId].errorType) {
+      // FIXED: If we're still waiting for OTP (not cancelled), stop the pipeline
+      if (requests[requestId].errorType === 'INVALID_OTP') {
+        console.log(`[${requestId}] Still waiting for OTP retry, stopping pipeline`);
+        return;
+      }
+      
+      // If the cookie script failed and we're not authenticated, throw error
+      if (exitCode !== 0 && !requests[requestId].authCompleted && !requests[requestId].errorType) {
         throw new Error(`GenerateAmazonCookie exited with ${exitCode}: ${cookieError}`);
       }
       
-      // If we have an OTP error but the process is still running, continue
-      if (requests[requestId].errorType === 'INVALID_OTP') {
-        // Don't throw error, let the frontend handle OTP retry
-        console.log(`[${requestId}] OTP verification failed, waiting for retry...`);
-        return;
-      }
-      
-      // Ensure we mark authentication as complete
-      if (!requests[requestId].currentUrl?.includes('/alexa-privacy/apd/')) {
+      // Ensure we mark authentication as complete if we reached the target page
+      if (!requests[requestId].currentUrl?.includes('/alexa-privacy/apd/') && requests[requestId].authCompleted) {
         updateCurrentUrl('https://www.amazon.in/alexa-privacy/apd/rvh');
       }
-      addLog('Authentication completed successfully', 50);
 
       // Step 2: fetch Alexa activity - ONLY RUN IF AUTHENTICATION SUCCEEDED
-      if (!requests[requestId].errorType) {
+      if (!requests[requestId].errorType && requests[requestId].authCompleted) {
         requests[requestId].step = 'fetch';
         requests[requestId].status = 'running';
         addLog('Starting data extraction from your account... (this may take sometime) ', 55);
 
         let activityCount = 0;
-        // In the fetch step, replace the custom object with the actual process:
         const fetchProcess = exec(`python "${fetchScript}"`, { env });
 
         // Track the actual process with a simple wrapper
@@ -1082,7 +1085,7 @@ app.post('/api/packet-report', (req, res) => {
             });
           });
 
-          // NEW: Step 4: Download audio files - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
+          // Step 4: Download audio files - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
           if (!requests[requestId].errorType) {
             requests[requestId].step = 'download_audio';
             addLog('Initializing content for offline use...', 95);
@@ -1108,7 +1111,7 @@ app.post('/api/packet-report', (req, res) => {
               });
             });
 
-            // NEW: Step 5: Generate comprehensive report - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
+            // Step 5: Generate comprehensive report - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
             if (!requests[requestId].errorType) {
               requests[requestId].step = 'generate_report';
               addLog('Generating comprehensive HTML report with embedded audio...', 97);
@@ -1122,7 +1125,7 @@ app.post('/api/packet-report', (req, res) => {
                   console.log(`[${requestId}] Report generation output:`, stdout);
                   if (stderr) console.error(`[${requestId}] Report generation stderr:`, stderr);
                   
-                  // NEW: Check for audio cleanup completion
+                  // Check for audio cleanup completion
                   if (stdout.includes('Temporary audio files have been cleaned up')) {
                     addLog('Audio files cleaned up to save storage space', 98);
                   }
@@ -1134,7 +1137,7 @@ app.post('/api/packet-report', (req, res) => {
                 });
               });
 
-              // NEW: Step 6: hash and prepare final report for download - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
+              // Step 6: hash and prepare final report for download - ONLY RUN IF PREVIOUS STEPS SUCCEEDED
               if (!requests[requestId].errorType) {
                 requests[requestId].step = 'hash';
                 addLog('Finalizing report package...', 99);
@@ -1151,7 +1154,6 @@ app.post('/api/packet-report', (req, res) => {
                 });
 
                 requests[requestId].step = 'completed';
-                // NEW: Set filePath to the html report instead of HTML
                 requests[requestId].filePath = htmlReportPath;
                 requests[requestId].done = true;
                 requests[requestId].status = 'completed';
@@ -1205,21 +1207,24 @@ app.get('/api/2fa-status/:id', (req, res) => {
   res.json(info);
 });
 
-// Frontend sends OTP for a request id
+// FIXED: Frontend sends OTP for a request id with improved state management
 app.post('/api/submit-otp/:id', (req, res) => {
   const id = req.params.id;
   const { otp } = req.body;
   const info = requests[id];
   if (!info) return res.status(404).send('Not found');
+  
   info.otp = otp;
   info.status = 'otp_submitted';
-  info.otpError = null; // Clear any previous OTP errors
-  info.showOtpModal = false; // NEW: Immediately hide OTP modal after submission
+  info.otpError = null;
+  info.showOtpModal = false;
+  info.waitingForOtpRetry = false; // FIXED: Clear waiting flag when OTP is submitted
+  
   console.log(`[${id}] OTP received from frontend (masked): ${otp ? otp.replace(/\d/g,'*') : ''}`);
   res.json({ ok: true });
 });
 
-// NEW: Clear OTP for retry
+// Clear OTP for retry
 app.post('/api/internal/clear-otp/:id', (req, res) => {
   const id = req.params.id;
   const info = requests[id];
@@ -1240,7 +1245,7 @@ app.post('/api/confirm-2fa/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// NEW: Endpoint to cancel pipeline execution
+// Endpoint to cancel pipeline execution
 app.post('/api/cancel-acquisition/:id', async (req, res) => {
   const id = req.params.id;
   const info = requests[id];
@@ -1248,8 +1253,7 @@ app.post('/api/cancel-acquisition/:id', async (req, res) => {
 
   console.log(`[${id}] User requested cancellation of pipeline`);
 
-  // NEW: Enhanced cancelPipeline function to handle user cancellation
-  const cancelPipeline = async (requestId, errorType, errorMessage) => { // CHANGED: Add requestId parameter
+  const cancelPipeline = async (requestId, errorType, errorMessage) => {
     if (requests[requestId]) {
       console.log(`[${requestId}] Cancelling pipeline due to: ${errorType}`);
       
@@ -1261,15 +1265,14 @@ app.post('/api/cancel-acquisition/:id', async (req, res) => {
         });
       }
       
-      // Kill all child processes - handle both spawn and exec processes
+      // Kill all child processes
       const cleanupPromises = requests[requestId].childProcesses.map(async (child) => {
         try {
-          // For spawn processes (actual ChildProcess objects)
+          // For spawn processes
           if (child && typeof child.kill === 'function' && child.pid) {
             console.log(`[${requestId}] Terminating spawn process (PID: ${child.pid})...`);
             child.kill('SIGTERM');
             
-            // Wait for process to exit with timeout
             return new Promise((resolve) => {
               const timeout = setTimeout(() => {
                 if (child.exitCode === null) {
@@ -1279,7 +1282,6 @@ app.post('/api/cancel-acquisition/:id', async (req, res) => {
                 resolve();
               }, 3000);
               
-              // Clear timeout if process exits normally
               child.on('exit', () => {
                 clearTimeout(timeout);
                 console.log(`[${requestId}] Spawn process exited normally`);
@@ -1287,14 +1289,13 @@ app.post('/api/cancel-acquisition/:id', async (req, res) => {
               });
             });
           } 
-          // For exec processes (custom objects with kill method)
+          // For exec processes
           else if (child && typeof child.kill === 'function') {
             console.log(`[${requestId}] Killing exec process...`);
             child.kill();
             console.log(`[${requestId}] Exec process killed`);
             return Promise.resolve();
           } 
-          // For any other type, just log and continue
           else {
             console.warn(`[${requestId}] Unknown child process type:`, typeof child);
             return Promise.resolve();
@@ -1305,13 +1306,9 @@ app.post('/api/cancel-acquisition/:id', async (req, res) => {
         }
       });
 
-      // Wait for all cleanup to complete
       await Promise.all(cleanupPromises);
       
-      // Clear the array
       requests[requestId].childProcesses = [];
-      
-      // Set cancellation state
       requests[requestId].errorType = errorType;
       requests[requestId].status = 'cancelled';
       requests[requestId].error = errorMessage;
@@ -1321,20 +1318,17 @@ app.post('/api/cancel-acquisition/:id', async (req, res) => {
     }
   };
 
-  // Cancel the pipeline - pass the id as parameter
   await cancelPipeline(id, 'CANCELLED', 'Data acquisition was cancelled by user.');
-
   res.json({ ok: true, message: 'Pipeline cancelled successfully' });
 });
 
-// Internal endpoint used by the headless node script to set detected method / message
+// CRITICAL FIX: Internal endpoint used by the headless node script to set detected method / message
 app.post('/api/internal/2fa-update/:id', (req, res) => {
   const id = req.params.id;
   const { method, message, currentUrl, errorType, otpError, showOtpModal } = req.body;
   const info = requests[id];
   if (!info) return res.status(404).send('Not found');
   
-  // FIX: Only update method if it's provided and not null/undefined
   if (method !== undefined && method !== null) {
     info.method = method;
   }
@@ -1342,12 +1336,26 @@ app.post('/api/internal/2fa-update/:id', (req, res) => {
   info.message = message || null;
   info.status = 'waiting_for_2fa';
   
-  // NEW: Handle OTP modal display and errors
+  // Add the message as a log entry for the frontend
+  if (message && message.trim()) {
+    const lastLog = info.logs[info.logs.length - 1];
+    if (!lastLog || lastLog.message !== message) {
+      info.logs.push({
+        timestamp: new Date().toISOString(),
+        message: message
+      });
+      console.log(`[${id}] HTTP LOG: ${message}`);
+    }
+  }
+  
+  // FIXED: Improved OTP error handling with retry count tracking
   if (errorType === 'INVALID_OTP') {
     info.errorType = errorType;
-    info.showOtpModal = showOtpModal !== undefined ? showOtpModal : true; // NEW: Reopen OTP modal for invalid OTP
+    info.showOtpModal = showOtpModal !== undefined ? showOtpModal : true;
     info.otpError = otpError || 'The code you entered is not valid. Please check the code and try again.';
-    // FIX: Ensure method is set to OTP when we have invalid OTP
+    info.waitingForOtpRetry = true;
+    
+    // Set method to OTP if not already set
     if (!info.method || !info.method.includes('OTP')) {
       info.method = 'OTP (SMS/Voice)';
     }
@@ -1355,12 +1363,12 @@ app.post('/api/internal/2fa-update/:id', (req, res) => {
     info.errorType = errorType;
     info.status = 'error';
     info.error = message || 'Push notification was denied';
-    info.showOtpModal = false; // Ensure OTP modal is closed
+    info.showOtpModal = false;
   } else if (errorType === 'UNKNOWN_2FA_PAGE') {
     info.errorType = errorType;
     info.status = 'error';
     info.error = message || 'Unknown 2FA page detected';
-    info.showOtpModal = false; // Ensure OTP modal is closed
+    info.showOtpModal = false;
   } else {
     info.showOtpModal = showOtpModal !== undefined ? showOtpModal : (method && method.includes('OTP'));
     info.otpError = null;
@@ -1369,7 +1377,11 @@ app.post('/api/internal/2fa-update/:id', (req, res) => {
   if (currentUrl) {
     info.currentUrl = currentUrl;
   }
-  console.log(`[${id}] 2FA update from script:`, method, message, currentUrl, errorType, showOtpModal);
+  
+  if (method || errorType || (message && message.includes('2FA') || message.includes('authentication') || message.includes('error'))) {
+    console.log(`[${id}] Status update: ${method || ''} ${message || ''} ${errorType || ''}`);
+  }
+  
   res.json({ ok: true });
 });
 
@@ -1382,25 +1394,24 @@ app.get('/api/internal/get-otp/:id', (req, res) => {
     otp: info.otp || null, 
     userConfirmed2FA: !!info.userConfirmed2FA,
     showOtpModal: !!info.showOtpModal,
-    otpError: info.otpError || null
+    otpError: info.otpError || null,
+    waitingForOtpRetry: !!info.waitingForOtpRetry // FIXED: Include waiting state
   });
 });
 
-// Download endpoint once pipeline is complete - FIXED FOR MULTIPLE DOWNLOADS
+// Download endpoint once pipeline is complete
 app.get('/api/download/:id', (req, res) => {
   const id = req.params.id;
   const info = requests[id];
   if (!info) return res.status(404).send('Not found');
   if (!info.done) return res.status(400).send('Not ready');
-  let filePath = info.filePath; // Use let because we might change it in fallback
+  let filePath = info.filePath;
   
-  // DEBUG: Log what file path we're trying to serve
   console.log(`[${id}] Download requested, filePath: ${filePath}`);
   
   if (!filePath || !fs.existsSync(filePath)) {
     console.log(`[${id}] File not found at path: ${filePath}`);
     
-    // FALLBACK: Check if HTML report exists even if filePath wasn't set correctly
     const htmlReportPath = path.join(__dirname, '..', 'smart_assistant_report.html');
     if (fs.existsSync(htmlReportPath)) {
       console.log(`[${id}] Serving fallback HTML report`);
@@ -1410,7 +1421,6 @@ app.get('/api/download/:id', (req, res) => {
     }
   }
   
-  // Determine file type and set appropriate headers
   if (filePath.endsWith('.html')) {
     res.setHeader('Content-Type', 'text/html');
     res.setHeader('Content-Disposition', 'attachment; filename="smart_assistant_report.html"');
@@ -1420,7 +1430,6 @@ app.get('/api/download/:id', (req, res) => {
     res.setHeader('Content-Disposition', 'attachment; filename="alexa_data.json"');
     console.log(`[${id}] Serving JSON data: ${filePath}`);
   } else {
-    // Default to download with original filename
     const filename = path.basename(filePath);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   }
@@ -1431,11 +1440,7 @@ app.get('/api/download/:id', (req, res) => {
       return res.status(500).send('Error sending file');
     }
     
-    // NOTE: We don't delete the HTML file here anymore - it will be cleaned up when a new pipeline starts
     console.log(`[${id}] File sent successfully`);
-    
-    // FIXED: Do NOT clean up the request from memory so multiple downloads work
-    // The request will be cleaned up when the user goes back to acquisition or starts a new one
   });
 });
 
@@ -1445,7 +1450,6 @@ const PORT = process.env.PORT || 5000;
 const buildPath = path.join(__dirname, '..', 'build');
 if (fs.existsSync(buildPath)) {
   app.use(express.static(buildPath));
-  // Send index.html for non-API routes (let /api/* stay handled by Express)
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/artifact') || req.path.startsWith('/artifacts')) return next();
     res.sendFile(path.join(buildPath, 'index.html'));
@@ -1454,10 +1458,8 @@ if (fs.existsSync(buildPath)) {
 
 (async () => {
   try {
-    // await connectDB(); // ensure DB is ready before accepting requests
     const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
-    // Graceful shutdown: close Mongo client and HTTP server on SIGINT/SIGTERM
     const shutdown = async () => {
       console.log('Shutting down...');
       try {
@@ -1472,7 +1474,6 @@ if (fs.existsSync(buildPath)) {
         console.log('HTTP server closed');
         process.exit(0);
       });
-      // Fallback forced exit
       setTimeout(() => process.exit(1), 10000);
     };
 
