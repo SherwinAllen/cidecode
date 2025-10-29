@@ -15,26 +15,22 @@ app.use(express.json());
 app.use('/api/files', express.static(path.join(__dirname, 'backup')));
 
 
-const mongoURI = "mongodb://localhost:27017/forensic_evidence";
-let db, gfs;
+// Use MONGO_URI from env (set by docker-compose) or fallback to localhost
+const mongoURI = process.env.MONGO_URI || process.env.MONGO_URL || "mongodb://localhost:27017/forensic_evidence";
+let db, gfs, mongoClient;
 
 const connectDB = async () => {
   try {
-    const client = await MongoClient.connect(mongoURI);
-    db = client.db();
+    mongoClient = new MongoClient(mongoURI, { useNewUrlParser: true, useUnifiedTopology: true });
+    await mongoClient.connect();
+    db = mongoClient.db(); // DB name taken from URI if present
     gfs = new GridFSBucket(db, { bucketName: 'fs' });
-    console.log('✅ Connected to MongoDB');
+    console.log('✅ Connected to MongoDB at', mongoURI);
   } catch (error) {
     console.error('❌ MongoDB connection error:', error);
-    process.exit(1);
+    throw error;
   }
 };
-
-
-// === Express Setup ===
-// connectDB()
-// Serve static files from the backup directory
-app.use('/api/files', express.static(path.join(__dirname, 'backup')));
 
 // === MongoDB Artifact Routes ===
 app.get("/", (req, res) => {
@@ -574,20 +570,16 @@ app.get('/api/packet-report', async (req, res) => {
       
       // Run the scripts sequentially
       await new Promise((resolve, reject) => {
-        exec(
-          'python "C:\\Users\\shamb\\OneDrive\\Documents\\CIDECODE\\cidecode\\backend\\samsung_adb.py" && python "C:\\Users\\shamb\\OneDrive\\Documents\\CIDECODE\\cidecode\\backend\\report_gen.py" && python "C:\\Users\\shamb\\OneDrive\\Documents\\CIDECODE\\logcat_llm_test.py"',
-          { maxBuffer: 1024 * 1024 * 50 },
-          (error, stdout, stderr) => {
-            if (error) {
-              console.error(`Error generating SmartWatch report: ${error}`);
-              return reject(error);
-            }
-
-            console.log("✅ Report generated successfully!");
-            console.log(stdout);
-            resolve(); 
+        const cmd = `python "${script1}" && python "${script2}"`;
+        exec(cmd, { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
+          if (error) {
+            console.error(`Error generating SmartWatch report:`, error, stderr);
+            return reject(error);
           }
-        );
+          console.log("✅ Report generated successfully!");
+          console.log(stdout);
+          resolve();
+        });
       });
       // Path to the generated DOCX
       const docxPath = path.join(__dirname, '..', 'Forensic_Log_Report.docx');
@@ -876,7 +868,6 @@ app.post('/api/packet-report', (req, res) => {
           requests[requestId].showOtpModal = false;
           addLog('OTP verification successful! Continuing data extraction...', 50);
         }
-
         // NEW: Detect authentication errors from the cookie script and CANCEL PIPELINE
         if (data.includes('INVALID_EMAIL')) {
           cancelPipeline('INVALID_EMAIL', 'Invalid email address provided');
@@ -1448,5 +1439,47 @@ app.get('/api/download/:id', (req, res) => {
   });
 });
 
-const PORT = 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 5000;
+
+// Serve frontend build when available (production single-image mode)
+const buildPath = path.join(__dirname, '..', 'build');
+if (fs.existsSync(buildPath)) {
+  app.use(express.static(buildPath));
+  // Send index.html for non-API routes (let /api/* stay handled by Express)
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/artifact') || req.path.startsWith('/artifacts')) return next();
+    res.sendFile(path.join(buildPath, 'index.html'));
+  });
+}
+
+(async () => {
+  try {
+    // await connectDB(); // ensure DB is ready before accepting requests
+    const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+    // Graceful shutdown: close Mongo client and HTTP server on SIGINT/SIGTERM
+    const shutdown = async () => {
+      console.log('Shutting down...');
+      try {
+        if (mongoClient && mongoClient.close) {
+          await mongoClient.close();
+          console.log('Mongo client closed');
+        }
+      } catch (e) {
+        console.error('Error closing Mongo client:', e);
+      }
+      server.close(() => {
+        console.log('HTTP server closed');
+        process.exit(0);
+      });
+      // Fallback forced exit
+      setTimeout(() => process.exit(1), 10000);
+    };
+
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  } catch (err) {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  }
+})();
