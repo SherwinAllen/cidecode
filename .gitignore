@@ -117,6 +117,7 @@ backend/audio_urls.json
 *.csv
 *.tar
 
+/downloaded_audio/*
 /downloads/*
 /sdcard/*
 /summaries/*
