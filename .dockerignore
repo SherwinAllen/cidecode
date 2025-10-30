@@ -1,0 +1,17 @@
+node_modules
+**/.env
+backend/.env
+.vscode
+.idea
+dist
+build
+.git
+.gitignore
+npm-debug.log
+Dockerfile*
+docker-compose*.yml
+*.pyc
+__pycache__/
+*.log
+backup/
+*.seed

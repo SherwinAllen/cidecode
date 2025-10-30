@@ -1,0 +1,69 @@
+version: "3.8"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cidecode_app_dev
+    env_file:
+      - backend/.env
+    environment:
+      - NODE_ENV=development
+      - MONGO_URI=mongodb://mongo:27017/forensic_evidence
+    ports:
+      - "5000:5000"
+    volumes:
+      - .:/app:cached
+      - /app/node_modules
+    depends_on:
+      - mongo
+    shm_size: '1gb'
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cidecode_web_dev
+    command: sh -c "cd /app && npm start"
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - NODE_ENV=development
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app:cached
+      - /app/node_modules
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:latest
+    container_name: cidecode_mongo_dev
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+      MONGO_INITDB_DATABASE: forensic_evidence
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+    restart: unless-stopped
+
+  mongo-express:
+    image: mongo-express:1.0.0
+    container_name: cidecode_mongo_express
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongo
+      ME_CONFIG_MONGODB_ADMINUSERNAME: root
+      ME_CONFIG_MONGODB_ADMINPASSWORD: example
+    ports:
+      - "8081:8081"
+    depends_on:
+      - mongo
+    restart: unless-stopped
+
+volumes:
+  mongo_data:

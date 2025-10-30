@@ -238,8 +238,78 @@ def is_on_2fa_page(driver):
     except:
         return False
 
+def is_passkey_modal_visible(driver):
+    """NEW: Detect if the passkey modal is visible"""
+    try:
+        print('🔍 Checking for passkey modal...')
+        
+        # Check for passkey modal indicators in the page source
+        page_source = driver.page_source.lower()
+        modal_indicators = [
+            'passkey' in page_source,
+            'keychain' in page_source,
+            'use a saved passkey' in page_source,
+            'use a phone or tablet' in page_source,
+            'conditions of use' in page_source and 'privacy notice' in page_source
+        ]
+        
+        # Also check for specific elements that might indicate the modal
+        modal_selectors = [
+            'input[type="password"][data-testid="password"]',  # Password field might be present but modal on top
+        ]
+        
+        # Check if we can interact with the password field (if not, modal might be blocking)
+        try:
+            password_field = driver.find_element(By.CSS_SELECTOR, '#ap_password')
+            if not password_field.is_displayed() or not password_field.is_enabled():
+                return True
+        except:
+            pass
+        
+        # If multiple modal indicators are present, it's likely the passkey modal
+        if sum(modal_indicators) >= 2:
+            print('✅ Passkey modal detected')
+            return True
+            
+        return False
+    except Exception as error:
+        print(f'Error checking for passkey modal: {error}')
+        return False
+
+def close_passkey_modal(driver):
+    """NEW: Close the passkey modal by pressing Escape key"""
+    try:
+        print('🔄 Attempting to close passkey modal with Escape key...')
+        
+        # Try pressing Escape multiple times with delays
+        for attempt in range(3):
+            print(f'   Attempt {attempt + 1}/3: Pressing Escape key...')
+            
+            # Press Escape key
+            from selenium.webdriver.common.action_chains import ActionChains
+            actions = ActionChains(driver)
+            actions.send_keys(Keys.ESCAPE).perform()
+            
+            # Wait a bit to see if modal closes
+            time.sleep(2)
+            
+            # Check if modal is still visible
+            if not is_passkey_modal_visible(driver):
+                print('✅ Passkey modal closed successfully!')
+                return True
+                
+            # Additional wait before next attempt
+            time.sleep(1)
+        
+        print('❌ Could not close passkey modal after 3 attempts')
+        return False
+        
+    except Exception as error:
+        print(f'Error closing passkey modal: {error}')
+        return False
+
 def is_unknown_2fa_page(driver):
-    """Detect unknown 2FA page (not OTP or Push)"""
+    """Detect unknown 2FA page (not OTP or Push) - ENHANCED to detect passkey modal"""
     try:
         print('🔍 Checking for unknown 2FA page...')
         
@@ -252,6 +322,11 @@ def is_unknown_2fa_page(driver):
             method = detect_2fa_method(driver)
             if method in ['OTP (SMS/Voice)', 'Push Notification']:
                 return False
+        
+        # NEW: Check for passkey modal specifically
+        if is_passkey_modal_visible(driver):
+            print('🔴 Detected passkey modal - will attempt to close it')
+            return 'PASSKEY_MODAL'
         
         # Check if we're on any Amazon authentication page that's not the target page
         current_url = driver.current_url
@@ -335,7 +410,7 @@ def is_incorrect_password_error(driver):
         return False
 
 def check_for_auth_errors(driver, context='general'):
-    """Check for authentication errors - IMPROVED"""
+    """Check for authentication errors - IMPROVED with passkey modal handling"""
     print(f'🔍 Checking for authentication errors (context: {context})...')
     
     # Check for invalid email error
@@ -350,8 +425,17 @@ def check_for_auth_errors(driver, context='general'):
         print('   The password provided does not match the email address')
         return 'INCORRECT_PASSWORD'
     
-    # NEW: Check for unknown 2FA page
-    if is_unknown_2fa_page(driver):
+    # NEW: Check for passkey modal specifically
+    unknown_2fa_result = is_unknown_2fa_page(driver)
+    if unknown_2fa_result == 'PASSKEY_MODAL':
+        print('🔴 PASSKEY MODAL DETECTED: Attempting to close it...')
+        if close_passkey_modal(driver):
+            print('✅ Passkey modal closed successfully, continuing authentication...')
+            return 'PASSKEY_MODAL_CLOSED'
+        else:
+            print('❌ PASSKEY MODAL: Could not close passkey modal')
+            return 'PASSKEY_MODAL_ERROR'
+    elif unknown_2fa_result is True:
         print('❌ UNKNOWN 2FA PAGE: Unsupported authentication method detected')
         print('   This account requires additional verification that cannot be automated')
         return 'UNKNOWN_2FA_PAGE'
@@ -775,9 +859,16 @@ def perform_full_authentication(driver):
 
         time.sleep(2)
 
-        # Check for email errors
-        email_error = check_for_auth_errors(driver)
-        if email_error == 'INVALID_EMAIL':
+        # NEW: Check for passkey modal after email submission
+        print('🔍 Checking for passkey modal after email submission...')
+        auth_error = check_for_auth_errors(driver)
+        if auth_error == 'PASSKEY_MODAL_CLOSED':
+            # Modal was closed successfully, continue with password entry
+            print('✅ Passkey modal closed, continuing with password entry...')
+        elif auth_error == 'PASSKEY_MODAL_ERROR':
+            print('❌ Could not close passkey modal, trying to continue anyway...')
+            # Try to continue despite modal error
+        elif auth_error == 'INVALID_EMAIL':
             update_server_status(
                 message='The email address is not associated with an Amazon account',
                 error_type='INVALID_EMAIL'
@@ -961,7 +1052,15 @@ def handle_re_auth(driver):
 
         time.sleep(2)
         
-        # NEW: Check for authentication errors after submitting password
+        # NEW: Check for passkey modal during re-authentication
+        print('🔍 Checking for passkey modal during re-authentication...')
+        auth_error = check_for_auth_errors(driver)
+        if auth_error == 'PASSKEY_MODAL_CLOSED':
+            print('✅ Passkey modal closed during re-auth, continuing...')
+        elif auth_error == 'PASSKEY_MODAL_ERROR':
+            print('❌ Could not close passkey modal during re-auth, trying to continue anyway...')
+        
+        # Check for authentication errors after submitting password
         print('🔍 Checking for re-authentication errors...')
         auth_error = check_for_auth_errors(driver)
         if auth_error == 'INCORRECT_PASSWORD':
@@ -1100,16 +1199,19 @@ def main():
         options.add_argument('--disable-extensions')
         options.add_argument('--window-size=1920,1080')
         
-        # DISABLE PASSWORD SAVING AND PASSKEY PROMPTS
+        # DISABLE PASSWORD SAVING AND PASSKEY PROMPTS - ENHANCED
         options.add_argument('--disable-save-password-bubble')
         options.add_argument('--disable-autofill-keyboard-accessory-view')
-        options.add_argument('--disable-features=PasswordSave,PasswordsAccountStorage,AutofillServerCommunication,AutofillShowTypePredictions')
+        options.add_argument('--disable-features=PasswordSave,PasswordsAccountStorage,AutofillServerCommunication,AutofillShowTypePredictions,WebAuthentication')
         options.add_argument('--disable-single-click-autofill')
         options.add_argument('--disable-password-manager-reauthentication')
         options.add_argument('--disable-webauthn')
-        options.add_argument('--disable-blink-features=WebAuthentication')
+        options.add_argument('--disable-blink-features=WebAuthentication,WebAuthenticationAPI')
+        options.add_argument('--disable-component-update')
+        options.add_argument('--disable-back-forward-cache')
+        options.add_argument('--incognito')
         
-        # Add experimental options to disable password manager and autofill
+        # Add experimental options to disable password manager and autofill - ENHANCED
         options.add_experimental_option('prefs', {
             'credentials_enable_service': False,
             'profile.password_manager_enabled': False,
@@ -1120,15 +1222,18 @@ def main():
             'password_manager_allow_show_passwords': False,
             'webauthn': {
                 'enable_inline_cloud_access': False,
-                'enable_hybrid': False
-            }
+                'enable_hybrid': False,
+                'enable_android': False
+            },
+            'webauthn.rp.enable_android': False,
+            'webauthn.os_platform_authenticator_enabled': False
         })
         
         if headless:
             options.add_argument('--headless')
         
         # Use version_main to specify the Chrome version
-        driver = uc.Chrome(options=options, version_main=130)
+        driver = uc.Chrome(options=options)
         
         # Set up signal handlers for graceful shutdown
         setup_signal_handlers(driver)
