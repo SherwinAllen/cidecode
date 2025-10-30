@@ -24,9 +24,9 @@ const connectDB = async () => {
     await mongoClient.connect();
     db = mongoClient.db(); // DB name taken from URI if present
     gfs = new GridFSBucket(db, { bucketName: 'fs' });
-    console.log('✅ Connected to MongoDB at', mongoURI);
+    console.log(' Connected to MongoDB at', mongoURI);
   } catch (error) {
-    console.error('❌ MongoDB connection error:', error);
+    console.error(' MongoDB connection error:', error);
     throw error;
   }
 };
@@ -139,7 +139,7 @@ app.get('/api/download-file', async (req, res) => {
     const fileName = path.basename(filePath);
     const localPath = path.join(tempDir, fileName);
     
-    console.log(`📥 Pulling file: ${filePath}`);
+    console.log(` Pulling file: ${filePath}`);
     await runAdbCommand(`adb pull "/sdcard/${filePath}" "${localPath}"`);
     
     // Determine content type
@@ -305,7 +305,7 @@ async function checkAdbDevice() {
       throw new Error('No authorized devices found. Check USB debugging authorization.');
     }
 
-    console.log(`✅ Found ${authorizedDevices.length} authorized device(s)`);
+    console.log(` Found ${authorizedDevices.length} authorized device(s)`);
     return true;
   } catch (error) {
     throw new Error(`Device check failed: ${error.message}`);
@@ -314,15 +314,15 @@ async function checkAdbDevice() {
 
 function runAdbCommand(command, options = {}) {
   return new Promise((resolve, reject) => {
-    console.log(`🔧 Running ADB: ${command}`);
+    console.log(` Running ADB: ${command}`);
     exec(command, { maxBuffer: 1024 * 1024 * 100, ...options }, (error, stdout, stderr) => {
       if (error) {
-        console.error(`❌ ADB command failed: ${error.message}`);
+        console.error(` ADB command failed: ${error.message}`);
         reject(new Error(`ADB command failed: ${stderr || error.message}`));
         return;
       }
       if (stderr && !options.ignoreStderr) {
-        console.warn(`⚠️ ADB stderr: ${stderr}`);
+        console.warn(` ADB stderr: ${stderr}`);
       }
       resolve(stdout);
     });
@@ -346,7 +346,7 @@ async function scanFolderRecursive(basePath, currentPath = '', depth = 0) {
   }
   
   try {
-    console.log(`📁 Scanning (depth ${depth}): ${fullPath}`);
+    console.log(` Scanning (depth ${depth}): ${fullPath}`);
     
     // Get all items (simple list)
     const itemsOutput = await runAdbCommand(`adb shell "ls -1 '${fullPath}'"`, { ignoreStderr: true });
@@ -395,11 +395,11 @@ async function scanFolderRecursive(basePath, currentPath = '', depth = 0) {
       }
     }
 
-    console.log(`✅ ${fullPath}: ${folderNode.children.length} items`);
+    console.log(` ${fullPath}: ${folderNode.children.length} items`);
     return folderNode;
     
   } catch (error) {
-    console.error(`❌ Error scanning folder ${fullPath}:`, error.message);
+    console.error(` Error scanning folder ${fullPath}:`, error.message);
     throw error;
   }
 }
@@ -407,7 +407,7 @@ async function scanFolderRecursive(basePath, currentPath = '', depth = 0) {
 // NEW: Get list of top-level folders in /sdcard
 app.get('/api/scan-folders', async (req, res) => {
   try {
-    console.log('🔍 Scanning for top-level folders...');
+    console.log(' Scanning for top-level folders...');
     await checkAdbDevice();
     
     const lsOutput = await runAdbCommand('adb shell ls -la /sdcard/', { ignoreStderr: true });
@@ -427,10 +427,10 @@ app.get('/api/scan-folders', async (req, res) => {
       }
     }
     
-    console.log(`✅ Found ${folderNames.length} folders:`, folderNames);
+    console.log(` Found ${folderNames.length} folders:`, folderNames);
     res.json(folderNames);
   } catch (err) {
-    console.error('❌ Folder scan error:', err.message);
+    console.error(' Folder scan error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -444,13 +444,13 @@ app.get('/api/scan-folder', async (req, res) => {
   }
   
   try {
-    console.log(`🔍 Scanning folder: ${folderPath}`);
+    console.log(` Scanning folder: ${folderPath}`);
     await checkAdbDevice();
     
     const folderData = await scanFolderRecursive('/sdcard/', folderPath);
     res.json(folderData);
   } catch (err) {
-    console.error(`❌ Error scanning folder ${folderPath}:`, err.message);
+    console.error(` Error scanning folder ${folderPath}:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -458,7 +458,7 @@ app.get('/api/scan-folder', async (req, res) => {
 // NEW: Quick scan of common folders only (faster alternative)
 app.get('/api/quick-scan', async (req, res) => {
   try {
-    console.log('🚀 Starting quick scan of common folders...');
+    console.log(' Starting quick scan of common folders...');
     await checkAdbDevice();
     
     const commonFolders = ['DCIM', 'Download', 'Pictures', 'Music', 'Documents', 'Movies', 'Podcasts'];
@@ -470,7 +470,7 @@ app.get('/api/quick-scan', async (req, res) => {
     
     for (const folder of commonFolders) {
       try {
-        console.log(`🔍 Quick scanning: ${folder}`);
+        console.log(` Quick scanning: ${folder}`);
         // Check if folder exists and get basic info
         const exists = await runAdbCommand(`adb shell "test -d /sdcard/${folder} && echo exists"`, { ignoreStderr: true })
           .then(output => output.includes('exists'))
@@ -501,10 +501,10 @@ app.get('/api/quick-scan', async (req, res) => {
       }
     }
     
-    console.log('✅ Quick scan completed');
+    console.log(' Quick scan completed');
     res.json(root);
   } catch (err) {
-    console.error('❌ Quick scan error:', err.message);
+    console.error(' Quick scan error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -512,14 +512,14 @@ app.get('/api/quick-scan', async (req, res) => {
 // Original filesystem endpoint (with fallback)
 app.get('/api/filesystem', async (req, res) => {
   try {
-    console.log('🔄 Starting filesystem fetch from smartwatch...');
+    console.log(' Starting filesystem fetch from smartwatch...');
     
-    // ✅ Just call the performQuickScan function we created earlier
+    //  Just call the performQuickScan function we created earlier
     const result = await performQuickScan();
     res.json(result);
     
   } catch (err) {
-    console.error('❌ Filesystem fetch error:', err.message);
+    console.error(' Filesystem fetch error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -549,7 +549,7 @@ app.get('/api/filesystem', async (req, res) => {
     const fsTree = await buildFilesystemTree();
     res.json(fsTree);
   } catch (err) {
-    console.error('❌ Filesystem fetch error:', err.message);
+    console.error(' Filesystem fetch error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -574,7 +574,7 @@ app.get('/api/packet-report', async (req, res) => {
             console.error(`Error generating SmartWatch report:`, error, stderr);
             return reject(error);
           }
-          console.log("✅ Report generated successfully!");
+          console.log(" Report generated successfully!");
           console.log(stdout);
           resolve();
         });
@@ -582,7 +582,7 @@ app.get('/api/packet-report', async (req, res) => {
       // Path to the generated DOCX
       const docxPath = path.join(__dirname, '..', 'Forensic_Log_Report.docx');
 
-      // ✅ Read artifacts from JSON file instead of .txt
+      //  Read artifacts from JSON file instead of .txt
       const jsonPath = path.join(__dirname,  "..", 'packet_report.json');
       let artifacts = {};
 
@@ -593,7 +593,7 @@ app.get('/api/packet-report', async (req, res) => {
 
       console.log("Artifacts loaded:", Object.keys(artifacts));
 
-      // ✅ Return JSON (not a blob)
+      //  Return JSON (not a blob)
       res.json({
         success: true,
         docxFileName: 'Forensic_Log_Report.docx',
@@ -644,7 +644,7 @@ function cleanupPreviousPipelineFiles() {
     'smart_assistant_report.html'
   ];
   
-  console.log('🧹 Cleaning up previous pipeline files...');
+  console.log(' Cleaning up previous pipeline files...');
   
   filesToCleanup.forEach(filePath => {
     try {
@@ -1101,8 +1101,8 @@ app.post('/api/packet-report', (req, res) => {
                 
                 // Parse download results
                 if (stdout.includes('Download Summary')) {
-                  const successMatch = stdout.match(/✅ Successful: (\d+)/);
-                  const failedMatch = stdout.match(/❌ Failed: (\d+)/);
+                  const successMatch = stdout.match(/ Successful: (\d+)/);
+                  const failedMatch = stdout.match(/ Failed: (\d+)/);
                   if (successMatch && failedMatch) {
                     addLog(`Audio download: ${successMatch[1]} successful, ${failedMatch[1]} failed`, 96);
                   }

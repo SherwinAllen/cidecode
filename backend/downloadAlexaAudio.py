@@ -47,12 +47,12 @@ def download_audio_file(audio_url, cookies_dict, output_dir="downloaded_audio", 
             session = requests.Session()
             session.cookies.update(cookies_dict)
             
-            print(f"🔊 Downloading (attempt {attempt + 1}/{max_retries}): {audio_url.split('/')[-1][:50]}...")
+            print(f" Downloading (attempt {attempt + 1}/{max_retries}): {audio_url.split('/')[-1][:50]}...")
             
             # Add progressive delay between retries
             if attempt > 0:
                 delay = 2 ** attempt  # Exponential backoff: 2, 4, 8, 16 seconds
-                print(f"⏳ Retrying in {delay} seconds...")
+                print(f" Retrying in {delay} seconds...")
                 time.sleep(delay)
             
             response = session.get(audio_url, headers=headers, timeout=60, stream=True)
@@ -98,11 +98,11 @@ def download_audio_file(audio_url, cookies_dict, output_dir="downloaded_audio", 
                             if total_size > 0:
                                 percent = (downloaded_size / total_size) * 100
                                 if attempt == 0:  # Only show progress on first attempt
-                                    print(f"📥 Progress: {percent:.1f}%", end='\r')
+                                    print(f" Progress: {percent:.1f}%", end='\r')
                 
                 # Verify file was actually downloaded
                 if os.path.getsize(filepath) == 0:
-                    print(f"❌ Empty file downloaded, retrying...")
+                    print(f" Empty file downloaded, retrying...")
                     os.remove(filepath)
                     continue
                 
@@ -113,7 +113,7 @@ def download_audio_file(audio_url, cookies_dict, output_dir="downloaded_audio", 
                         base64_audio = base64.b64encode(audio_data).decode('utf-8')
                     
                     file_size_kb = len(audio_data) / 1024
-                    print(f"✅ Downloaded: {filename} ({file_size_kb:.1f} KB)")
+                    print(f" Downloaded: {filename} ({file_size_kb:.1f} KB)")
                     return {
                         'filename': filename,
                         'base64': base64_audio,
@@ -123,34 +123,34 @@ def download_audio_file(audio_url, cookies_dict, output_dir="downloaded_audio", 
                         'size_kb': file_size_kb
                     }
                 except Exception as e:
-                    print(f"❌ Error processing file {filename}: {e}")
+                    print(f" Error processing file {filename}: {e}")
                     if os.path.exists(filepath):
                         os.remove(filepath)
                     continue
                     
             else:
-                print(f"❌ HTTP {response.status_code} on attempt {attempt + 1}")
+                print(f" HTTP {response.status_code} on attempt {attempt + 1}")
                 if response.status_code == 403:
-                    print("🔒 Access forbidden - possible authentication issue")
+                    print(" Access forbidden - possible authentication issue")
                 elif response.status_code == 404:
-                    print("🔍 Audio file not found")
+                    print(" Audio file not found")
                 elif response.status_code == 429:
-                    print("🚦 Rate limited - increasing delay")
+                    print(" Rate limited - increasing delay")
                     time.sleep(10)
                 continue
                 
         except requests.exceptions.Timeout:
-            print(f"⏰ Timeout on attempt {attempt + 1}")
+            print(f" Timeout on attempt {attempt + 1}")
             continue
         except requests.exceptions.ConnectionError:
-            print(f"🔌 Connection error on attempt {attempt + 1}")
+            print(f" Connection error on attempt {attempt + 1}")
             time.sleep(5)
             continue
         except Exception as e:
-            print(f"❌ Unexpected error on attempt {attempt + 1}: {e}")
+            print(f" Unexpected error on attempt {attempt + 1}: {e}")
             continue
     
-    print(f"💥 Failed to download after {max_retries} attempts: {audio_url}")
+    print(f" Failed to download after {max_retries} attempts: {audio_url}")
     return None
 
 def validate_cookies(cookies_dict):
@@ -167,17 +167,17 @@ def validate_cookies(cookies_dict):
         
         if response.status_code == 200:
             if "alexa-privacy" in response.url and "signin" not in response.url:
-                print("✅ Cookies are valid and fresh")
+                print(" Cookies are valid and fresh")
                 return True
             else:
-                print("❌ Cookies expired - redirected to signin")
+                print(" Cookies expired - redirected to signin")
                 return False
         else:
-            print(f"❌ Cookie validation failed with status {response.status_code}")
+            print(f" Cookie validation failed with status {response.status_code}")
             return False
             
     except Exception as e:
-        print(f"❌ Cookie validation error: {e}")
+        print(f" Cookie validation error: {e}")
         return False
 
 def cleanup_matched_file():
@@ -186,36 +186,36 @@ def cleanup_matched_file():
     try:
         if os.path.exists(matched_file):
             os.remove(matched_file)
-            print(f"🧹 Deleted: {matched_file}")
+            print(f" Deleted: {matched_file}")
     except Exception as e:
-        print(f"⚠️ Warning: Could not clean up {matched_file}: {e}")
+        print(f" Warning: Could not clean up {matched_file}: {e}")
 
 def process_all_audio_files():
     """Process all audio URLs from the matched transcripts with guaranteed success"""
     # Load cookies
     cookies_list = load_cookies()
     if not cookies_list:
-        print("❌ No cookies found. Please run authentication first.")
+        print(" No cookies found. Please run authentication first.")
         return None
     
     cookies_dict = create_cookie_dict(cookies_list)
     
     # Validate cookies before starting
-    print("🔐 Validating authentication cookies...")
+    print(" Validating authentication cookies...")
     if not validate_cookies(cookies_dict):
-        print("❌ Cookie validation failed. Please re-authenticate.")
+        print(" Cookie validation failed. Please re-authenticate.")
         return None
     
     # Load matched transcripts
     transcripts_file = "matched_audio_transcripts.json"
     if not os.path.exists(transcripts_file):
-        print("❌ No matched transcripts found. Please run the extraction pipeline first.")
+        print(" No matched transcripts found. Please run the extraction pipeline first.")
         return None
     
     with open(transcripts_file, 'r', encoding='utf-8') as f:
         matched_data = json.load(f)
     
-    print(f"📊 Processing {len(matched_data)} audio entries with guaranteed download...")
+    print(f" Processing {len(matched_data)} audio entries with guaranteed download...")
     
     audio_data_map = {}
     successful_downloads = 0
@@ -253,13 +253,13 @@ def process_all_audio_files():
         print(f"⏳ Waiting {delay} seconds before next download...")
         time.sleep(delay)
     
-    print(f"\n📈 GUARANTEED DOWNLOAD SUMMARY:")
-    print(f"   ✅ Successful downloads: {successful_downloads}")
-    print(f"   🔄 Retry successes: {retry_successes}")
-    print(f"   ❌ Failed downloads: {failed_downloads}")
-    print(f"   📊 Total processed: {len(matched_data)}")
+    print(f"\n GUARANTEED DOWNLOAD SUMMARY:")
+    print(f"    Successful downloads: {successful_downloads}")
+    print(f"    Retry successes: {retry_successes}")
+    print(f"    Failed downloads: {failed_downloads}")
+    print(f"    Total processed: {len(matched_data)}")
     try:
-        print(f"   🎯 Success rate: {(successful_downloads/len(matched_data))*100:.1f}%")
+        print(f"    Success rate: {(successful_downloads/len(matched_data))*100:.1f}%")
     except ZeroDivisionError:
         pass
     
@@ -268,21 +268,21 @@ def process_all_audio_files():
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(audio_data_map, f, indent=2, ensure_ascii=False)
     
-    print(f"💾 Enhanced data saved to: {output_file}")
+    print(f" Enhanced data saved to: {output_file}")
     
     # Clean up matched file after successful processing
-    print(f"\n🧹 Cleaning up intermediate files...")
+    print(f"\n Cleaning up intermediate files...")
     cleanup_matched_file()
     
     # Final validation
     if failed_downloads > 0:
-        print(f"\n⚠️  {failed_downloads} downloads failed. Consider:")
+        print(f"\n  {failed_downloads} downloads failed. Consider:")
         print("   - Running the script again (it will skip already downloaded files)")
         print("   - Checking your internet connection")
         print("   - Verifying Amazon authentication is still valid")
         print("   - Increasing max_retries in the code")
     else:
-        print(f"\n🎉 100% SUCCESS RATE ACHIEVED! All audio files downloaded successfully!")
+        print(f"\n 100% SUCCESS RATE ACHIEVED! All audio files downloaded successfully!")
     
     return audio_data_map
 
@@ -291,7 +291,7 @@ def resume_failed_downloads():
     enhanced_file = "enhanced_audio_transcripts.json"
     
     if not os.path.exists(enhanced_file):
-        print("❌ No enhanced data file found. Run main process first.")
+        print(" No enhanced data file found. Run main process first.")
         return None
     
     with open(enhanced_file, 'r', encoding='utf-8') as f:
@@ -304,29 +304,29 @@ def resume_failed_downloads():
             failed_urls.append(url)
     
     if not failed_urls:
-        print("✅ No failed downloads to resume!")
+        print(" No failed downloads to resume!")
         return audio_data_map
     
-    print(f"🔄 Resuming {len(failed_urls)} failed downloads...")
+    print(f" Resuming {len(failed_urls)} failed downloads...")
     
     cookies_list = load_cookies()
     if not cookies_list:
-        print("❌ No cookies found.")
+        print(" No cookies found.")
         return None
     
     cookies_dict = create_cookie_dict(cookies_list)
     
     resumed_success = 0
     for url in failed_urls:
-        print(f"\n🔄 Resuming: {url.split('/')[-1][:50]}...")
+        print(f"\n Resuming: {url.split('/')[-1][:50]}...")
         audio_info = download_audio_file(url, cookies_dict, max_retries=10)  # More retries for resume
         
         if audio_info:
             audio_data_map[url]['audio_info'] = audio_info
             resumed_success += 1
-            print(f"✅ Resumed successfully!")
+            print(f" Resumed successfully!")
         else:
-            print(f"❌ Still failed after resume attempts")
+            print(f" Still failed after resume attempts")
         
         time.sleep(2)
     
@@ -334,9 +334,9 @@ def resume_failed_downloads():
     with open(enhanced_file, 'w', encoding='utf-8') as f:
         json.dump(audio_data_map, f, indent=2, ensure_ascii=False)
     
-    print(f"\n📈 RESUME SUMMARY:")
-    print(f"   ✅ Successfully resumed: {resumed_success}")
-    print(f"   ❌ Still failed: {len(failed_urls) - resumed_success}")
+    print(f"\n RESUME SUMMARY:")
+    print(f"    Successfully resumed: {resumed_success}")
+    print(f"    Still failed: {len(failed_urls) - resumed_success}")
     
     return audio_data_map
 
@@ -353,5 +353,5 @@ if __name__ == "__main__":
         failed_count = sum(1 for data in audio_data_map.values() if data.get('audio_info') is None)
         
         if failed_count > 0:
-            print(f"\n🔄 Automatically resuming {failed_count} failed downloads...")
+            print(f"\n Automatically resuming {failed_count} failed downloads...")
             resume_failed_downloads()

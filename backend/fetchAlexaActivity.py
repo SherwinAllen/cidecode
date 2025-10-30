@@ -61,7 +61,7 @@ def intercept_request(route, request):
             'headers': dict(request.headers),
             'activity_num': None
         }
-        print(f"   🔊 Audio Request: {url.split('/')[-1][:50]}...")
+        print(f"    Audio Request: {url.split('/')[-1][:50]}...")
         
     route.continue_()
 
@@ -116,7 +116,7 @@ def save_audio_url(url, activity_num):
     with open(AUDIO_URLS_FILE, "w") as f:
         json.dump(existing_data, f, indent=2)
     
-    print(f"   💾 Audio for Activity {activity_num}")
+    print(f"    Audio for Activity {activity_num}")
     
     # Track in memory for current session
     if activity_num not in activity_audio_map:
@@ -151,7 +151,7 @@ def intercept_response(response):
             
             # Save audio for this activity
             if save_audio_url(url, most_recent_activity):
-                print(f"   ✅ Audio assigned to Activity {most_recent_activity}")
+                print(f"    Audio assigned to Activity {most_recent_activity}")
 
     except Exception as e:
         pass
@@ -354,7 +354,7 @@ def find_and_click_play_button_deterministic(activity, activity_num, max_attempt
                     # Shorter delay for stability
                     time.sleep(0.3)
                     
-                    print(f"      🎵 Play button {activity_num} (attempt {attempt + 1})...")
+                    print(f"       Play button {activity_num} (attempt {attempt + 1})...")
                     
                     # Record the click timestamp for precise audio correlation
                     record_play_button_click(activity_num)
@@ -374,10 +374,10 @@ def find_and_click_play_button_deterministic(activity, activity_num, max_attempt
                     ]
                     
                     if recent_audio_requests:
-                        print(f"      ✅ Play button successful {activity_num}")
+                        print(f"       Play button successful {activity_num}")
                         return True
                     else:
-                        print(f"      ⚠️ No audio detected, retrying...")
+                        print(f"       No audio detected, retrying...")
                         continue
                         
             except Exception as e:
@@ -385,7 +385,7 @@ def find_and_click_play_button_deterministic(activity, activity_num, max_attempt
         
         # If no success with any selector, wait and retry
         if attempt < max_attempts - 1:
-            print(f"      🔄 Retrying play button {activity_num}...")
+            print(f"       Retrying play button {activity_num}...")
             time.sleep(0.75)
     
     return False
@@ -412,7 +412,7 @@ def ensure_activity_expanded(activity, activity_num):
                     # If it's a chevron-down, it means it's collapsed, so click to expand
                     expand_buttons.first.click()
                     time.sleep(0.3)  # Reduced from 0.5
-                    print(f"      📂 Expanded {activity_num}")
+                    print(f"       Expanded {activity_num}")
                 return True
         except Exception:
             continue
@@ -446,7 +446,7 @@ def process_activity_batch(activities, start_index, end_index, total_activities)
             audio_clicked = find_and_click_play_button_deterministic(activity, activity_num)
             
             if not audio_clicked:
-                print(f"      🚨 No play button {activity_num}")
+                print(f"       No play button {activity_num}")
             
             # Wait for audio load (KEEP ORIGINAL TIMING)
             time.sleep(0.5)
@@ -482,7 +482,7 @@ def process_single_activity_deterministic(activity, activity_num, total_activiti
     audio_clicked = find_and_click_play_button_deterministic(activity, activity_num)
     
     if not audio_clicked:
-        print(f"      🚨 No play button {activity_num}")
+        print(f"       No play button {activity_num}")
         
     # Step 4: Wait for audio to load (KEEP ORIGINAL TIMING)
     time.sleep(0.5)
@@ -555,7 +555,7 @@ def fast_scroll_to_load_more(page, current_processed_count):
 
 def continuous_load_and_process_optimized(page):
     """Continuous loading and processing - HEAVILY OPTIMIZED"""
-    print("🔄 Starting loading and processing...")
+    print(" Starting loading and processing...")
     
     total_processed = 0
     consecutive_no_new_count = 0
@@ -567,7 +567,7 @@ def continuous_load_and_process_optimized(page):
         return 0
         
     initial_count = initial_activities.count()
-    print(f"   📊 Found {initial_count} activities")
+    print(f"    Found {initial_count} activities")
     
     # Use dynamic batch sizing based on total activities
     if initial_count <= 20:
@@ -613,7 +613,7 @@ def continuous_load_and_process_optimized(page):
         start_index = total_processed
         end_index = min(current_activity_count, start_index + batch_size)
         
-        print(f"   🔄 Processing {start_index + 1} to {end_index}")
+        print(f"    Processing {start_index + 1} to {end_index}")
         
         # Process batch
         for i in range(start_index, end_index):
@@ -641,8 +641,8 @@ Transcript: [Error processing activity: {e}]
                 processed_activities.add(i)
                 continue
         
-        print(f"   ✅ Processed {end_index - start_index} activities")
-        print(f"   📈 Total: {total_processed}/{current_activity_count}")
+        print(f"    Processed {end_index - start_index} activities")
+        print(f"    Total: {total_processed}/{current_activity_count}")
         
         # Scroll to load more activities
         fast_scroll_to_load_more(page, total_processed)
@@ -668,7 +668,7 @@ def save_final_outputs():
 
 def post_process_audio_assignment():
     """Post-process to ensure all activities have audio URLs assigned"""
-    print("🔍 Post-processing audio assignment...")
+    print(" Post-processing audio assignment...")
     
     # Read saved audio data
     try:
@@ -692,21 +692,21 @@ def post_process_audio_assignment():
             missing_audio.append(i)
     
     if missing_audio:
-        print(f"   ⚠️  Missing audio: {missing_audio}")
-        print(f"   🔄 Recovering missing audio...")
+        print(f"     Missing audio: {missing_audio}")
+        print(f"    Recovering missing audio...")
         
         # Check if we have unassigned audio requests
         for activity_num in missing_audio:
             for req_id, req_data in audio_request_tracker.items():
                 if req_data.get('activity_num') is None and is_valid_audio_url(req_data['url']):
                     if save_audio_url(req_data['url'], activity_num):
-                        print(f"   ✅ Recovered audio {activity_num}")
+                        print(f"    Recovered audio {activity_num}")
                         break
     
     return len(missing_audio)
 
 # ========== OPTIMIZED MAIN EXECUTION ==========
-print("🚀 Starting Alexa Audio & Transcript Extraction")
+print(" Starting Alexa Audio & Transcript Extraction")
 print("=" * 60)
 
 with sync_playwright() as p:
@@ -723,9 +723,9 @@ with sync_playwright() as p:
         with open(cookies_path, "r") as f:
             cookies = json.load(f)
         context.add_cookies(cookies)
-        print("✅ Cookies loaded")
+        print(" Cookies loaded")
     else:
-        print("❌ Cookies file not found.")
+        print(" Cookies file not found.")
         exit(1)
     
     # Open a new page
@@ -735,24 +735,24 @@ with sync_playwright() as p:
     page.route("**/*", intercept_request)
     page.on("response", intercept_response)
 
-    print("🌐 Navigating to Alexa privacy page...")
+    print(" Navigating to Alexa privacy page...")
     
     try:
         page.goto("https://www.amazon.in/alexa-privacy/apd/rvh", wait_until="domcontentloaded")
         
         # Check if we're actually on the right page and logged in
         if "signin" in page.url or page.locator("input#ap_email").count() > 0:
-            print("❌ Not logged in.")
+            print(" Not logged in.")
             browser.close()
             exit(1)
             
     except Exception as e:
-        print(f"❌ Navigation failed: {e}")
+        print(f" Navigation failed: {e}")
         browser.close()
         exit(1)
 
     # Apply date filter
-    print("\n📅 Setting date filter to 'Last 7 days'...")
+    print("\n Setting date filter to 'Last 7 days'...")
     try:
         filter_button = page.locator("#filters-selected-bar > button")
         if filter_button.count() > 0:
@@ -768,12 +768,12 @@ with sync_playwright() as p:
                 if last_7_days.count() > 0:
                     last_7_days.click()
                     time.sleep(1)  # Reduced from 2
-                    print("✅ Date filter applied")
+                    print(" Date filter applied")
     except Exception as e:
-        print(f"⚠️  Date filter not applied: {e}")
+        print(f"  Date filter not applied: {e}")
 
     # Wait for page to load activities — prefer retry if initial batch is zero
-    print("⏳ Checking for initial batch of activities...")
+    print("Checking for initial batch of activities...")
     attempt = 1
     activities = None
 
@@ -792,16 +792,16 @@ with sync_playwright() as p:
             count = 0
 
         if count > 0:
-            print(f"✅ Found {count} activities on attempt {attempt}. Proceeding.")
+            print(f" Found {count} activities on attempt {attempt}. Proceeding.")
             break
 
         # no activities found — decide next step
         if attempt < MAX_INITIAL_BATCH_ATTEMPTS:
-            print(f"⚠️ No activities found on attempt {attempt}. Sleeping {RETRY_SLEEP}s and retrying...")
+            print(f" No activities found on attempt {attempt}. Sleeping {RETRY_SLEEP}s and retrying...")
             time.sleep(RETRY_SLEEP)
             attempt += 1
         else:
-            print(f"⚠️ No activities found after {MAX_INITIAL_BATCH_ATTEMPTS} attempts. Proceeding anyway.")
+            print(f" No activities found after {MAX_INITIAL_BATCH_ATTEMPTS} attempts. Proceeding anyway.")
             break
 
     # Now start processing
@@ -811,16 +811,16 @@ with sync_playwright() as p:
     end_time = time.time()
     processing_time = end_time - start_time
 
-    print(f"\n📊 PROCESSING COMPLETE in {processing_time:.1f}s")
+    print(f"\n PROCESSING COMPLETE in {processing_time:.1f}s")
     print(f"   • Total activities processed: {total_processed}")
     print(f"   • Transcripts extracted: {len(ALL_TRANSCRIPTS)}")
 
     # Post-process to ensure 100% audio extraction
-    print("\n🔍 VERIFYING AUDIO EXTRACTION...")
+    print("\n VERIFYING AUDIO EXTRACTION...")
     remaining_missing = post_process_audio_assignment()
 
     # Final wait for any remaining audio URLs (reduced)
-    print("⏳ Finalizing audio extraction...")
+    print(" Finalizing audio extraction...")
     time.sleep(0.8)  # Reduced from 5
 
     # Save all final outputs
@@ -844,20 +844,20 @@ with sync_playwright() as p:
     activities_with_audio = list(audio_by_activity.keys())
     activities_without_audio = [num for num in range(1, total_processed + 1) if num not in audio_by_activity]
 
-    print(f"\n🎯 FINAL AUDIO ANALYSIS:")
+    print(f"\n FINAL AUDIO ANALYSIS:")
     print(f"   • Total audio URLs: {total_audio_entries}")
     print(f"   • Activities with audio: {len(activities_with_audio)}")
     print(f"   • Activities without audio: {len(activities_without_audio)}")
     
     if activities_without_audio:
-        print(f"   ⚠️  Missing audio: {activities_without_audio}")
+        print(f"     Missing audio: {activities_without_audio}")
 
     # Calculate final success rate
     success_rate = (len(activities_with_audio) / total_processed) * 100 if total_processed > 0 else 0
     
-    print(f"\n✅ OPTIMIZED EXTRACTION COMPLETE in {processing_time:.1f} seconds!")
+    print(f"\n OPTIMIZED EXTRACTION COMPLETE in {processing_time:.1f} seconds!")
     print("=" * 60)
-    print(f"📊 OPTIMIZED STATISTICS:")
+    print(f" OPTIMIZED STATISTICS:")
     print(f"   • Total activities: {total_processed}")
     print(f"   • Audio URLs: {total_audio_entries}")
     print(f"   • Transcripts: {len(ALL_TRANSCRIPTS)}")
@@ -865,11 +865,11 @@ with sync_playwright() as p:
     print(f"   • Processing speed: {total_processed/(processing_time/60):.1f} activities/minute")
     
     if success_rate < 100:
-        print(f"   🚨 CRITICAL: {100-success_rate:.1f}% audio failure!")
+        print(f"    CRITICAL: {100-success_rate:.1f}% audio failure!")
     else:
-        print(f"   🎉 SUCCESS: 100% audio extraction!")
+        print(f"    SUCCESS: 100% audio extraction!")
     
-    print(f"\n💾 OUTPUT FILES:")
+    print(f"\n OUTPUT FILES:")
     print(f"   • Audio URLs: {AUDIO_URLS_FILE}")
     print(f"   • Transcripts: {TRANSCRIPTS_FILE}")
     print("=" * 60)
