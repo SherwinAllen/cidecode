@@ -1043,7 +1043,7 @@ def main():
     
     try:
         headless = os.getenv('HEADLESS', 'true').lower() == 'true'
-        
+        chrome_version = int(os.getenv('CHROME_VERSION', None))
         print('Launching undetected-chromedriver...')
         update_server_status(message='Launching browser...')
         
@@ -1068,7 +1068,7 @@ def main():
         if headless:
             options.add_argument('--headless')
         
-        driver = uc.Chrome(options=options)
+        driver = uc.Chrome(options=options,version_main=chrome_version)
         
         # script that will be injected into every new page BEFORE page scripts run
         block_webauthn = r"""
