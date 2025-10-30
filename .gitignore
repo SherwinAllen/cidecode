@@ -124,3 +124,10 @@ backend/audio_urls.json
 /test/* 
 
 packet_report.json
+
+
+#All docker stuff
+.dockerignore
+Dockerfile
+docker-compose.yml
+docker-compose.dev.yml
