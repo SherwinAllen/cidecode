@@ -1068,7 +1068,7 @@ def main():
         if headless:
             options.add_argument('--headless')
         
-        driver = uc.Chrome(options=options,version_main=135)
+        driver = uc.Chrome(options=options)
         
         # script that will be injected into every new page BEFORE page scripts run
         block_webauthn = r"""
