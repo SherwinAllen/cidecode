@@ -449,7 +449,7 @@ def generate_html_report(audio_data_map, output_file="smart_assistant_report.htm
                 </header>
                 
                 <div class="empty-state">
-                    <div class="empty-icon">🎤</div>
+                    <div class="empty-icon"></div>
                     <h2 class="empty-title">No Amazon Smart Assistant Voice Activities Found</h2>
                     <div class="empty-description">
                         <p>No voice interactions were found in your Smart Assistant history for the selected time period (Last 7 days).</p>
@@ -592,9 +592,9 @@ def cleanup_enhanced_file():
     try:
         if os.path.exists(enhanced_file):
             os.remove(enhanced_file)
-            print(f"🧹 Deleted: {enhanced_file}")
+            print(f" Deleted: {enhanced_file}")
     except Exception as e:
-        print(f"⚠️ Warning: Could not clean up {enhanced_file}: {e}")
+        print(f" Warning: Could not clean up {enhanced_file}: {e}")
 
 def main():
     """Main function to generate comprehensive reports"""

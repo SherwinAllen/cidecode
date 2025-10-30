@@ -207,7 +207,7 @@ def match_audio_with_transcripts(audio_urls, transcripts_data):
     matched_audio_urls = []
     matched_transcripts = []
 
-    print(f"🔍 Matching audio URLs with transcripts by activity number...")
+    print(f" Matching audio URLs with transcripts by activity number...")
     print(f"   - Audio URLs activities: {sorted(audio_lookup.keys())}")
     print(f"   - Transcript activities: {sorted(transcript_lookup.keys())}")
     print(f"   - Common activities: {sorted_common}")
@@ -250,9 +250,9 @@ def process_duplicates_with_logic(audio_urls, transcripts_data):
                 for s in spoken:
                     filtered_audio_urls.append(cur_url)
                     filtered_transcripts.append(s)
-                print(f"🔊 Duplicate group {group_indices}: kept {len(spoken)} 'spoken', removed {len(group_transcripts)-len(spoken)} 'system'")
+                print(f" Duplicate group {group_indices}: kept {len(spoken)} 'spoken', removed {len(group_transcripts)-len(spoken)} 'system'")
             else:
-                print(f"🔊 Duplicate group {group_indices}: removed all {len(group_transcripts)} 'system' entries")
+                print(f" Duplicate group {group_indices}: removed all {len(group_transcripts)} 'system' entries")
             i = j
         else:
             filtered_audio_urls.append(cur_url)
@@ -276,13 +276,13 @@ def cleanup_input_files(audio_urls_file, transcripts_file):
     try:
         if os.path.exists(audio_urls_file):
             os.remove(audio_urls_file)
-            print(f"🧹 Deleted: {audio_urls_file}")
+            print(f" Deleted: {audio_urls_file}")
         
         if os.path.exists(transcripts_file):
             os.remove(transcripts_file)
-            print(f"🧹 Deleted: {transcripts_file}")
+            print(f" Deleted: {transcripts_file}")
     except Exception as e:
-        print(f"⚠️ Warning: Could not clean up input files: {e}")
+        print(f" Warning: Could not clean up input files: {e}")
 
 # ----------------------
 # Main run with file path arguments
@@ -291,54 +291,54 @@ def main(audio_urls_file, transcripts_file, output_file="matched_audio_transcrip
     """
     Main function that processes audio URLs and transcripts from specified files
     """
-    print(f"📁 Loading audio URLs from {audio_urls_file}...")
+    print(f" Loading audio URLs from {audio_urls_file}...")
     try:
         with open(audio_urls_file, "r", encoding="utf-8") as fa:
             audio_urls_data = json.load(fa)
-        print(f"📊 Loaded {len(audio_urls_data)} audio URLs")
+        print(f" Loaded {len(audio_urls_data)} audio URLs")
     except FileNotFoundError:
-        print(f"❌ Error: Audio URLs file '{audio_urls_file}' not found")
+        print(f" Error: Audio URLs file '{audio_urls_file}' not found")
         return
     except json.JSONDecodeError:
-        print(f"❌ Error: Invalid JSON format in '{audio_urls_file}'")
+        print(f" Error: Invalid JSON format in '{audio_urls_file}'")
         return
 
-    print(f"📁 Loading and processing transcripts from {transcripts_file}...")
+    print(f" Loading and processing transcripts from {transcripts_file}...")
     try:
         # Use the new parser for structured format
         transcripts_data = parse_structured_transcripts(transcripts_file)
-        print(f"📊 Parsed {len(transcripts_data)} transcripts")
+        print(f" Parsed {len(transcripts_data)} transcripts")
     except FileNotFoundError:
-        print(f"❌ Error: Transcripts file '{transcripts_file}' not found")
+        print(f" Error: Transcripts file '{transcripts_file}' not found")
         return
 
     # Show sample of parsed entries
-    print("\n🔍 Sample parsed entries (first 10):")
+    print("\n Sample parsed entries (first 10):")
     for e in transcripts_data[:10]:
         print(f"  Activity {e['activity_number']}: transcript='{e['transcript'][:60]}' type={e['type']} timestamp='{e['timestamp']}' speaker='{e['speaker']}' device='{e['device']}'")
 
     # Match them
     matched_audio_urls, matched_transcripts = match_audio_with_transcripts(audio_urls_data, transcripts_data)
-    print(f"\n🔗 Matched {len(matched_audio_urls)} audio URLs with transcripts")
+    print(f"\n Matched {len(matched_audio_urls)} audio URLs with transcripts")
 
     # Process duplicates
     filtered_audio_urls, filtered_transcripts = process_duplicates_with_logic(matched_audio_urls, matched_transcripts)
-    print(f"\n📊 After duplicate processing: {len(filtered_audio_urls)} audio entries")
+    print(f"\n After duplicate processing: {len(filtered_audio_urls)} audio entries")
 
     # Final mapping and save
     final_mapping = create_final_mapping(filtered_audio_urls, filtered_transcripts)
     with open(output_file, "w", encoding='utf-8') as fout:
         json.dump(final_mapping, fout, indent=2, ensure_ascii=False)
 
-    print(f"\n✅ Final mapping saved to {output_file} (entries: {len(final_mapping)})")
+    print(f"\n Final mapping saved to {output_file} (entries: {len(final_mapping)})")
     
     # Show final statistics
     spoken_count = sum(1 for t in filtered_transcripts if t.get("type") == "spoken")
     system_count = len(filtered_transcripts) - spoken_count
-    print(f"📈 Final breakdown: {spoken_count} spoken, {system_count} system entries")
+    print(f" Final breakdown: {spoken_count} spoken, {system_count} system entries")
 
     # Clean up input files after successful processing
-    print(f"\n🧹 Cleaning up input files...")
+    print(f"\n Cleaning up input files...")
     cleanup_input_files(audio_urls_file, transcripts_file)
 
 if __name__ == "__main__":
@@ -346,7 +346,7 @@ if __name__ == "__main__":
     transcript_file = "alexa_activity_log.txt"
     output_file = "matched_audio_transcripts.json"
     
-    print("🔧 Processing files:")
+    print(" Processing files:")
     print(f"   - Audio URLs: {audio_file}")
     print(f"   - Transcripts: {transcript_file}")
     print(f"   - Output: {output_file}")

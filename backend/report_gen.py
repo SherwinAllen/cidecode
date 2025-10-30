@@ -262,7 +262,7 @@ def extract_sensor_data(log_text):
 def parse_bluetooth_log(doc, text):
     """Extracts Bluetooth connection and bonded device info."""
 
-    # 1️⃣ Connection / Disconnection events
+    # 1⃣ Connection / Disconnection events
     print(text)
     dates = re.findall(r"(\d{2}-\d{2})\s\d{2}:\d{2}:\d{2}\.\d{3}", text)
 
@@ -288,7 +288,7 @@ def parse_bluetooth_log(doc, text):
         doc.add_paragraph(title, style='Heading3')
         doc.add_picture(tmpfile.name, width=docx.shared.Inches(6))
 
-    # 2️⃣ Bonded devices
+    # 2⃣ Bonded devices
     bonded_pattern = r"\s*\(Connected\)\s*([0-9A-F:]{17}) \[.*?\] ([^\(]+)"
 
     bonded_match = re.findall(bonded_pattern, text)
@@ -400,7 +400,7 @@ def parse_wifi_log_extended(log_text: str):
     """
     dfs = {}
 
-    # 1️⃣ ---- Wi-Fi SSID/BSSID Info ----
+    # 1⃣ ---- Wi-Fi SSID/BSSID Info ----
     ssid_pattern = re.compile(
         r'rec\[\d+\]:\s+'                      # rec number
         r'time=(?P<timestamp>[\d\-:\. ]+)\s+'  # timestamp
@@ -426,7 +426,7 @@ def parse_wifi_log_extended(log_text: str):
                 "bssid": m.group('bssid')
             })
 
-    # 2️⃣ ---- Wi-Fi Metrics ----
+    # 2⃣ ---- Wi-Fi Metrics ----
     wifi_pattern = re.compile(
         r"time=(?P<time>[\d\-\s:]+).*?"
         r"session=(?P<session>[^,]+),?"
@@ -445,7 +445,7 @@ def parse_wifi_log_extended(log_text: str):
             if m:
                 wifi_records.append(m.groupdict())
 
-    # 3️⃣ ---- Supplicant State Tracker ----
+    # 3⃣ ---- Supplicant State Tracker ----
     supplicant_pattern = re.compile(
         r"rec\[\d+\]: time=(?P<time>[\d\-:\.\s]+).*?"
         r"org=(?P<org_state>\S+).*?"
@@ -462,7 +462,7 @@ def parse_wifi_log_extended(log_text: str):
     if supplicant_records:
         dfs["supplicant_states"] = pd.DataFrame(supplicant_records)
 
-    # 4️⃣ ---- Mlink / Multi-Link Operation ----
+    # 4⃣ ---- Mlink / Multi-Link Operation ----
     mlink_pattern = re.compile(
         r"\{linkId=(?P<linkId>\d+),linkRssi=(?P<linkRssi>[^,]+),linkFreq=(?P<linkFreq>[^,]+),"
         r"txLinkSpeed=(?P<txLinkSpeed>[^,]+),rxLinkSpeed=(?P<rxLinkSpeed>[^,]+).*?\}",
@@ -518,7 +518,7 @@ def parse_location_data(loc_path):
             })
 
         df = pd.DataFrame(rows)
-        print(f"✅ Parsed {len(df)} location entries.")
+        print(f" Parsed {len(df)} location entries.")
         print(df)
 
 log_files = {
